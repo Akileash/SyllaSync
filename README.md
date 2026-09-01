@@ -110,24 +110,7 @@ SyllaSync/
 ├── export_dashboard.py       # Excel dashboard formatter
 ├── discord_module.py         # Discord webhook digest
 ├── config.py                 # Loads .env
-├── .env.example              # Template (safe to commit)
-├── credentials.json.example  # Template (safe to commit)
-└── syllabi/                  # Your syllabus PDFs (gitignored)
+├── .env.example              # Template
+├── credentials.json.example  # Template
+└── syllabi/                  # Syllabus PDFs
 ```
-
-## Security
-
-**Never commit these files** (already listed in `.gitignore`):
-
-- `.env` — API tokens and webhook URLs
-- `credentials.json` — Google service account private key
-- `syllabi/*.pdf` — your course materials
-
-If any secret is ever exposed, rotate it immediately:
-
-- **Canvas:** revoke and regenerate the token in Canvas settings
-- **Discord:** delete and recreate the webhook
-- **Gemini:** revoke the key in Google AI Studio
-- **Google:** delete the service account key and create a new one
-
-Before your first `git push`, run `git status` and confirm `.env` and `credentials.json` do not appear.
