@@ -1,0 +1,26 @@
+# Secrets — never commit
+.env
+.env.*
+!.env.example
+local.env
+credentials.json
+
+# Generated / local data
+assignments.xlsx
+Sylla_Sync_Dashboard.xlsx
+syllabi/*.pdf
+syllabi/extracted/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+*.egg-info/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
