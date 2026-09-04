@@ -1,26 +1,46 @@
-# Secrets — never commit
+# --- Secrets (never commit) ---
 .env
 .env.*
 !.env.example
 local.env
+*.pem
+*.key
 credentials.json
+token.json
+token.pickle
+client_secret*.json
 
-# Generated / local data
+# --- Generated / local data ---
 assignments.xlsx
 Sylla_Sync_Dashboard.xlsx
-syllabi/*.pdf
-syllabi/extracted/
+*.xlsx
+!portfolio/**/*.xlsx
 
-# Python
+# Course PDFs and extracted text — keep folder via .gitkeep only
+syllabi/**
+!syllabi/.gitkeep
+
+# --- Python ---
 __pycache__/
 *.py[cod]
 *$py.class
+*.so
+.Python
 .venv/
 venv/
+env/
 *.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+dist/
+build/
 
-# OS / editor
+# --- OS / editor ---
 .DS_Store
 Thumbs.db
+Desktop.ini
 .idea/
 .vscode/
+*.swp
+*~

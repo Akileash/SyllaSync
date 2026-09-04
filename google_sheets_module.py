@@ -22,6 +22,7 @@ from gspread.exceptions import APIError, SpreadsheetNotFound
 
 from config import BASE_DIR, GOOGLE_SHEET_ID
 from date_utils import format_internal_datetime, format_sheet_date, format_sheet_time
+from sheets_module import _normalize_key
 
 logger = logging.getLogger(__name__)
 
@@ -120,13 +121,6 @@ def _open_masterlist(client: gspread.Client) -> gspread.Worksheet:
                 "and grant Editor access."
             ) from exc
         raise
-
-
-def _normalize_key(course: Any, title: Any) -> tuple[str, str]:
-    return (
-        str(course or "").strip().lower(),
-        str(title or "").strip().lower(),
-    )
 
 
 def _map_status_to_template(status: Any) -> str:
@@ -237,16 +231,15 @@ def load_from_google_sheet() -> pd.DataFrame:
 
 def _load_masterlist_with_rows(
     worksheet: gspread.Worksheet,
-) -> tuple[dict[tuple[str, str], int], int]:
+) -> tuple[dict[tuple[str, str], list[int]], int]:
     """
-    Load existing Masterlist entries keyed by (course, title) → row number.
+    Load existing Masterlist entries keyed by fuzzy (course, title) → row numbers.
 
     Returns:
-        (existing_keys, next_empty_row)
+        (existing_keys_to_rows, next_empty_row)
     """
     all_values = worksheet.get_all_values()
-    existing: dict[tuple[str, str], int] = {}
-    last_data_row = DATA_START_ROW - 1
+    existing: dict[tuple[str, str], list[int]] = {}
     next_empty_row = DATA_START_ROW
 
     for row_idx in range(DATA_START_ROW - 1, len(all_values)):
@@ -254,11 +247,9 @@ def _load_masterlist_with_rows(
         parsed = _row_to_internal(all_values[row_idx], row_number)
         if parsed:
             key = _normalize_key(parsed["Course"], parsed["Assessment title"])
-            existing[key] = row_number
-            last_data_row = row_number
-            next_empty_row = row_number + 1
+            existing.setdefault(key, []).append(row_number)
+            next_empty_row = max(next_empty_row, row_number + 1)
         elif row_idx + 1 >= DATA_START_ROW:
-            # First completely empty row after data — use for appends
             cells = all_values[row_idx]
             course = cells[COL_CLASS - 1] if len(cells) >= COL_CLASS else ""
             title = cells[COL_ASSIGNMENT - 1] if len(cells) >= COL_ASSIGNMENT else ""
@@ -269,6 +260,15 @@ def _load_masterlist_with_rows(
         next_empty_row = DATA_START_ROW
 
     return existing, next_empty_row
+
+
+def _clear_masterlist_row(worksheet: gspread.Worksheet, row_number: int) -> None:
+    """Blank Masterlist data columns B–H for a row (leaves formula columns intact)."""
+    worksheet.update(
+        values=[[""] * 7],
+        range_name=f"B{row_number}:H{row_number}",
+        value_input_option="USER_ENTERED",
+    )
 
 
 def _merge_records(
@@ -288,11 +288,13 @@ def _merge_records(
 def _write_masterlist_rows(
     worksheet: gspread.Worksheet,
     merged_df: pd.DataFrame,
-    existing_rows: dict[tuple[str, str], int],
+    existing_rows: dict[tuple[str, str], list[int]],
     next_empty_row: int,
 ) -> int:
     """
     Write merged data to Masterlist columns B–H without touching formula columns.
+
+    Collapses fuzzy-duplicate rows: keeps one row per assignment, clears extras.
 
     Returns:
         Number of rows written or updated.
@@ -302,18 +304,29 @@ def _write_masterlist_rows(
         return 0
 
     updates: list[dict[str, Any]] = []
+    clear_rows: list[int] = []
     append_row = next_empty_row
     written = 0
     min_row = None
     max_row = None
+    used_keys: set[tuple[str, str]] = set()
 
     for record in merged_df.to_dict(orient="records"):
         key = _normalize_key(record["Course"], record["Assessment title"])
         if not key[0] and not key[1]:
             continue
 
+        used_keys.add(key)
         row_values = _internal_to_masterlist_row(record)
-        target_row = existing_rows.get(key, append_row)
+        row_list = existing_rows.get(key, [])
+
+        if row_list:
+            target_row = row_list[0]
+            # Extra near-duplicate rows for this assignment → clear
+            clear_rows.extend(row_list[1:])
+        else:
+            target_row = append_row
+            append_row += 1
 
         updates.append(
             {
@@ -325,11 +338,29 @@ def _write_masterlist_rows(
         min_row = target_row if min_row is None else min(min_row, target_row)
         max_row = target_row if max_row is None else max(max_row, target_row)
 
-        if key not in existing_rows:
-            existing_rows[key] = append_row
-            append_row += 1
+        existing_rows[key] = [target_row]
 
-    worksheet.batch_update(updates, value_input_option="USER_ENTERED")
+    # Clear any leftover fuzzy duplicates that were collapsed out of merged_df
+    for key, rows in existing_rows.items():
+        if key in used_keys:
+            continue
+        # Only auto-clear when multiple sheet rows share one fuzzy key
+        # (true orphans that are unique historical rows are preserved).
+        if len(rows) > 1:
+            # Keep the first, clear the rest
+            clear_rows.extend(rows[1:])
+
+    if updates:
+        worksheet.batch_update(updates, value_input_option="USER_ENTERED")
+
+    cleared = 0
+    for row_number in sorted(set(clear_rows)):
+        _clear_masterlist_row(worksheet, row_number)
+        cleared += 1
+
+    if cleared:
+        logger.info("Cleared %d duplicate Masterlist row(s).", cleared)
+        print(f"      Cleared {cleared} duplicate Google Sheet row(s).")
 
     if written and min_row and max_row:
         _apply_date_column_format(worksheet, min_row, max_row)
