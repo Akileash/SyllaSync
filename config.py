@@ -18,6 +18,8 @@ DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GOOGLE_SHEET_ID = os.getenv("GOOGLE_SHEET_ID")
 EXCEL_FILE_PATH = os.getenv("EXCEL_FILE_PATH", str(BASE_DIR / "assignments.xlsx"))
+ALLOWED_COURSES = os.getenv("ALLOWED_COURSES", "")
+GOOGLE_CALENDAR_ID = os.getenv("GOOGLE_CALENDAR_ID", "")
 
 REQUIRED_VARS = {
     "CANVAS_URL": CANVAS_URL,
@@ -27,7 +29,11 @@ REQUIRED_VARS = {
 }
 
 
-def validate_env(require_discord: bool = False, require_google: bool = False) -> None:
+def validate_env(
+    require_discord: bool = False,
+    require_google: bool = False,
+    require_calendar: bool = False,
+) -> None:
     """Raise SystemExit if required environment variables are missing."""
     missing = [name for name, value in REQUIRED_VARS.items() if not value]
     if not require_discord and "DISCORD_WEBHOOK_URL" in missing:
@@ -35,6 +41,9 @@ def validate_env(require_discord: bool = False, require_google: bool = False) ->
 
     if require_google and not GOOGLE_SHEET_ID:
         missing.append("GOOGLE_SHEET_ID")
+
+    if require_calendar and not GOOGLE_CALENDAR_ID:
+        missing.append("GOOGLE_CALENDAR_ID")
 
     if missing:
         print(

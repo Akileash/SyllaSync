@@ -11,7 +11,8 @@ import requests
 from canvasapi import Canvas
 from canvasapi.exceptions import CanvasException
 
-from config import CANVAS_TOKEN, CANVAS_URL
+from config import ALLOWED_COURSES, CANVAS_TOKEN, CANVAS_URL
+from course_utils import compact_course_code, course_matches_allowed, parse_allowed_courses
 
 logger = logging.getLogger(__name__)
 
@@ -20,16 +21,6 @@ FILE_TITLE_PATTERNS = re.compile(
     r"syllabus|weekly\s*schedule|tentative\s*weekly\s*schedule",
     re.IGNORECASE,
 )
-
-
-def _short_course_code(course_name: str) -> str:
-    """Return a compact code like MATH201 from a Canvas course title."""
-    normalized = re.sub(r"\s+", " ", course_name.strip())
-    match = re.search(r"\b([A-Z]{2,5})\s*(\d{3}[A-Z]?)\b", normalized.upper())
-    if match:
-        return f"{match.group(1)}{match.group(2)}"
-    slug = re.sub(r"[^\w]+", "_", normalized).strip("_")
-    return slug[:40] or "course"
 
 
 def _safe_filename(course_code: str, title: str) -> str:
@@ -54,13 +45,15 @@ def _download_file(url: str, dest: Path, token: str) -> None:
 
 def download_syllabi_from_canvas(
     course_filter: str | None = None,
+    allowed_courses: list[str] | None = None,
     dest_dir: Path | None = None,
 ) -> list[Path]:
     """
     Download syllabus/schedule PDFs from Canvas module items.
 
     Args:
-        course_filter: Optional substring to match course name/code (e.g. "MATH 201").
+        course_filter: Optional single-course substring filter (legacy CLI flag).
+        allowed_courses: Optional list of canonical course codes to include.
         dest_dir: Output directory (defaults to syllabi/).
 
     Returns:
@@ -71,6 +64,9 @@ def download_syllabi_from_canvas(
 
     output_dir = dest_dir or SYLLABI_DIR
     output_dir.mkdir(exist_ok=True)
+
+    if allowed_courses is None:
+        allowed_courses = parse_allowed_courses(ALLOWED_COURSES)
 
     canvas = Canvas(CANVAS_URL, CANVAS_TOKEN)
     downloaded: list[Path] = []
@@ -91,7 +87,10 @@ def download_syllabi_from_canvas(
         if course_filter and course_filter.lower() not in course_name.lower():
             continue
 
-        course_code = _short_course_code(course_name)
+        if allowed_courses and not course_matches_allowed(course_name, allowed_courses):
+            continue
+
+        course_code = compact_course_code(course_name)
         logger.info("Scanning Canvas modules for %s (%s)", course_name, course_code)
 
         try:

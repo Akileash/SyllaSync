@@ -7,7 +7,8 @@ from typing import Any
 from canvasapi import Canvas
 from canvasapi.exceptions import CanvasException
 
-from config import CANVAS_TOKEN, CANVAS_URL
+from config import ALLOWED_COURSES, CANVAS_TOKEN, CANVAS_URL
+from course_utils import course_matches_allowed, normalize_course_code, parse_allowed_courses
 from date_utils import format_internal_datetime
 
 logger = logging.getLogger(__name__)
@@ -57,6 +58,8 @@ def fetch_canvas_assignments() -> list[dict[str, Any]]:
 
     assignments: list[dict[str, Any]] = []
 
+    allowed_courses = parse_allowed_courses(ALLOWED_COURSES)
+
     try:
         canvas = Canvas(CANVAS_URL, CANVAS_TOKEN)
         courses = canvas.get_courses(enrollment_state="active")
@@ -65,12 +68,17 @@ def fetch_canvas_assignments() -> list[dict[str, Any]]:
         raise
 
     for course in courses:
-        # Prefer course code (e.g. "ECE 210") for cleaner matching in the tracker.
-        course_name = (
+        raw_name = (
             getattr(course, "course_code", None)
             or getattr(course, "name", None)
             or f"Course {course.id}"
         )
+
+        if not course_matches_allowed(raw_name, allowed_courses):
+            continue
+
+        # Prefer normalized codes (e.g. "ECE 210") for cleaner matching in the tracker.
+        course_name = normalize_course_code(raw_name) or raw_name
 
         try:
             course_assignments = course.get_assignments(

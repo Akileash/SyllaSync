@@ -1,6 +1,8 @@
 # Sylla Sync
 
-Sync university assignments from **Canvas** and **syllabus PDFs** into an Excel dashboard or a **Google Sheets** assignment tracker. Optional **Discord** weekly digest included.
+Sync university assignments from **Canvas** and **syllabus PDFs** into an Excel dashboard or a **Google Sheets** assignment tracker. Optional **Google Calendar** events and **Discord** weekly digest included.
+
+📁 **Portfolio case study:** [portfolio/PORTFOLIO.md](portfolio/PORTFOLIO.md)
 
 **Requirements:** Python 3.10+, a Canvas account, and (for Google Sheets) a Google account.
 
@@ -27,6 +29,10 @@ cp credentials.json.example credentials.json
 |---|---|
 | `python main.py` | Local Excel → `Sylla_Sync_Dashboard.xlsx` |
 | `python main.py --google` | Push to Google Sheet **Masterlist** tab |
+| `python main.py --all` | Full pipeline: Sheets + Calendar + Discord |
+| `python main.py --google --calendar --weekly` | Same as `--all` (flags combined) |
+| `python main.py --google --calendar` | Google Sheet + Calendar due-date events |
+| `python main.py --calendar` | Excel dashboard + Calendar events |
 | `python main.py --weekly` | Excel export + Discord 7-day digest |
 | `python main.py --google --weekly` | Google Sheet + Discord digest |
 | `python main.py --google --course "MATH 201"` | Download syllabi for one course, then sync |
@@ -43,6 +49,7 @@ Copy `.env.example` → `.env` and fill in your values:
 | `CANVAS_TOKEN` | Yes | Canvas → **Account → Settings → Approved Integrations** |
 | `GEMINI_API_KEY` | Yes* | [Google AI Studio](https://aistudio.google.com/apikey) — for PDF parsing |
 | `GOOGLE_SHEET_ID` | For `--google` | The ID from your sheet URL: `docs.google.com/spreadsheets/d/SHEET_ID/edit` |
+| `GOOGLE_CALENDAR_ID` | For `--calendar` | Your Gmail address, or a dedicated calendar ID |
 | `DISCORD_WEBHOOK_URL` | For `--weekly` | Discord server webhook URL |
 
 \*Structured syllabus/schedule PDFs (e.g. weekly schedules) are parsed without Gemini. Gemini is used as a fallback for other PDF formats.
@@ -70,6 +77,26 @@ Targets the **Masterlist** tab of the [HHS Assignment Tracker](https://docs.goog
 
 Columns **I onward** (formulas, charts) are never modified.
 
+## Google Calendar setup
+
+Uses the **same** `credentials.json` service account as Sheets.
+
+1. In [Google Cloud Console](https://console.cloud.google.com/apis/library/calendar-json.googleapis.com) enable the **Google Calendar API** for your project.
+2. Open [Google Calendar](https://calendar.google.com) → hover your calendar → **⋮** → **Settings and sharing**.
+3. Under **Share with specific people or groups**, add the `client_email` from `credentials.json`.
+4. Set permission to **Make changes to events** → **Send**.
+5. In `.env`, set:
+   ```
+   GOOGLE_CALENDAR_ID=your_email@gmail.com
+   ```
+   Or use a dedicated calendar: Settings → **Integrate calendar** → copy **Calendar ID**.
+6. Run:
+   ```bash
+   python main.py --google --calendar
+   ```
+
+Re-runs are safe: events with the same title and date are updated, not duplicated. Each event is all-day with a 24-hour popup reminder.
+
 ## Syllabus PDFs
 
 **Option A — Manual:** Drop PDFs into `syllabi/`.
@@ -90,6 +117,7 @@ Parsed assignments are merged with Canvas data. Re-syncing preserves your manual
 |---|---|
 | `Missing required environment variable` | Check `.env` — values must not be placeholder text |
 | `Permission denied` on Google Sheets | Share your sheet with the service account `client_email` as Editor |
+| Calendar `403` / `Not Found` | Share the calendar with `client_email` (**Make changes to events**); set `GOOGLE_CALENDAR_ID`; enable Calendar API |
 | `Worksheet 'Masterlist' not found` | Use the [HHS Assignment Tracker](https://docs.google.com/spreadsheets/d/1ALoho_3oHCHn7qsL3HuwOTkCWu2Rz3ZojE3SVflN65c/copy) template |
 | `Canvas fetch failed` | Verify `CANVAS_URL` and `CANVAS_TOKEN`; classes may not be published yet |
 | `429` / quota error (Gemini) | Free tier limit hit — wait 24h or rely on structured PDF parsers |
@@ -106,6 +134,7 @@ SyllaSync/
 ├── canvas_syllabus_module.py # Download syllabi from Canvas modules
 ├── syllabus_module.py        # PDF parsing (regex + Gemini)
 ├── google_sheets_module.py   # Google Sheets → Masterlist
+├── google_calendar_module.py # Google Calendar due-date events
 ├── sheets_module.py          # Excel merge writer
 ├── export_dashboard.py       # Excel dashboard formatter
 ├── discord_module.py         # Discord webhook digest

@@ -10,6 +10,7 @@ import google.generativeai as genai
 from PyPDF2 import PdfReader
 
 from config import GEMINI_API_KEY
+from course_utils import normalize_course_code
 
 logger = logging.getLogger(__name__)
 
@@ -67,11 +68,16 @@ def _normalize_pdf_text(text: str) -> str:
 
 def _course_from_filename(filename: str) -> str:
     """Infer course code like MATH 201 from MATH201_Syllabus.pdf."""
-    stem = Path(filename).stem.upper()
-    match = re.search(r"\b([A-Z]{2,5})(\d{3}[A-Z]?)\b", stem.replace("_", " "))
+    stem = Path(filename).stem.upper().replace("_", "")
+    if stem.startswith("MATE") and len(stem) >= 7:
+        return f"MAT E {stem[4:7]}"
+    normalized = normalize_course_code(stem)
+    if normalized:
+        return normalized
+    match = re.match(r"([A-Z]+)(\d{3})", stem)
     if match:
         return f"{match.group(1)} {match.group(2)}"
-    return stem.replace("_", " ")
+    return Path(filename).stem.replace("_", " ")
 
 
 def _month_day_to_iso(month: str, day: str, year: int = FALL_TERM_YEAR) -> str:

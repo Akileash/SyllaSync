@@ -1,6 +1,7 @@
 """Combine assignment data and write to a local Excel assessment tracker."""
 
 import logging
+import re
 from pathlib import Path
 from typing import Any
 
@@ -12,8 +13,15 @@ from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.datavalidation import DataValidation
 
 from config import EXCEL_FILE_PATH
+from course_utils import normalize_course_code
 
 logger = logging.getLogger(__name__)
+
+# "Assignment #1: ...", "Quiz 2", "HW #3" → stable match key within a course
+NUMBERED_TASK_RE = re.compile(
+    r"^(assignment|quiz|exam|lab|homework|hw|project|midterm|final)\s*#?\s*(\d+)\b",
+    re.IGNORECASE,
+)
 
 SHEET_NAME = "Assessment Schedule"
 AUTO_COLUMNS = ["Course", "Assessment title", "Due Date"]
@@ -65,11 +73,79 @@ STATUS_OPTIONS = '"Not started,In Progress,Done"'
 PRIORITY_OPTIONS = '"P 1,P 2,P 3"'
 
 
+def _normalize_title_text(title: Any) -> str:
+    """Lowercase title with punctuation collapsed for comparison."""
+    text = str(title or "").strip().lower()
+    text = re.sub(r"[^\w\s#]+", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
 def _normalize_key(course: Any, title: Any) -> tuple[str, str]:
-    return (
-        str(course or "").strip().lower(),
-        str(title or "").strip().lower(),
-    )
+    """
+    Fuzzy match key so near-duplicate titles collapse.
+
+    Examples that become the same key under ENGG 299:
+      - "Assignment #1: Complete Co-op Expectations Agreement"
+      - "Assignment #1: Co-op Expectations Agreement"
+    """
+    course_raw = str(course or "").strip()
+    course_key = (normalize_course_code(course_raw) or course_raw).strip().lower()
+
+    title_norm = _normalize_title_text(title)
+    numbered = NUMBERED_TASK_RE.match(title_norm)
+    if numbered:
+        kind = numbered.group(1).lower()
+        if kind == "hw":
+            kind = "homework"
+        return course_key, f"{kind}#{numbered.group(2)}"
+
+    return course_key, title_norm
+
+
+def _prefer_title(current: str, candidate: str) -> str:
+    """Keep the more descriptive title when collapsing duplicates."""
+    cur = str(current or "").strip()
+    cand = str(candidate or "").strip()
+    if not cur:
+        return cand
+    if not cand:
+        return cur
+    if len(cand) > len(cur):
+        return cand
+    return cur
+
+
+def _collapse_by_match_key(df: pd.DataFrame) -> pd.DataFrame:
+    """Collapse rows that share the same fuzzy (course, title) match key."""
+    if df.empty:
+        return df.reindex(columns=[c for c in COLUMNS if c in df.columns] or list(df.columns))
+
+    best: dict[tuple[str, str], dict[str, Any]] = {}
+    for _, row in df.iterrows():
+        key = _normalize_key(row.get("Course", ""), row.get("Assessment title", ""))
+        if not key[0] and not key[1]:
+            continue
+
+        if key not in best:
+            best[key] = {col: row.get(col, "") for col in df.columns}
+            continue
+
+        existing = best[key]
+        existing["Assessment title"] = _prefer_title(
+            str(existing.get("Assessment title", "")),
+            str(row.get("Assessment title", "")),
+        )
+        # Prefer a parseable / newer-looking due date if current is empty
+        if not str(existing.get("Due Date", "")).strip() and str(row.get("Due Date", "")).strip():
+            existing["Due Date"] = row.get("Due Date", "")
+        for col in MANUAL_COLUMNS:
+            if col in df.columns and not str(existing.get(col, "")).strip():
+                existing[col] = row.get(col, "")
+
+    if not best:
+        return pd.DataFrame(columns=list(df.columns))
+
+    return pd.DataFrame(list(best.values()), columns=list(df.columns))
 
 
 def _incoming_from_sources(
@@ -113,16 +189,22 @@ def _merge_tracker(existing: pd.DataFrame, incoming: pd.DataFrame) -> pd.DataFra
     """
     Merge synced data with the existing tracker.
 
-    - Matching rows: update auto columns, keep manual columns.
+    - Matching rows (fuzzy title key): update auto columns, keep manual columns.
     - New rows: add with blank manual columns.
     - Rows only in existing: keep (preserves completed/historical entries).
+    - Near-duplicate titles within the same course are collapsed.
     """
+    existing = _collapse_by_match_key(existing.reindex(columns=COLUMNS).fillna(""))
+    incoming = _collapse_by_match_key(incoming.reindex(columns=AUTO_COLUMNS).fillna(""))
+
     manual_by_key: dict[tuple[str, str], dict[str, Any]] = {}
+    existing_title_by_key: dict[tuple[str, str], str] = {}
     for _, row in existing.iterrows():
         key = _normalize_key(row["Course"], row["Assessment title"])
         if not key[0] and not key[1]:
             continue
         manual_by_key[key] = {col: row.get(col, "") for col in MANUAL_COLUMNS}
+        existing_title_by_key[key] = str(row.get("Assessment title", ""))
 
     merged_rows: list[dict[str, Any]] = []
     incoming_keys: set[tuple[str, str]] = set()
@@ -134,10 +216,14 @@ def _merge_tracker(existing: pd.DataFrame, incoming: pd.DataFrame) -> pd.DataFra
 
         incoming_keys.add(key)
         manual = manual_by_key.get(key, {col: "" for col in MANUAL_COLUMNS})
+        title = _prefer_title(
+            existing_title_by_key.get(key, ""),
+            str(row.get("Assessment title", "")),
+        )
         merged_rows.append(
             {
                 "Course": row["Course"],
-                "Assessment title": row["Assessment title"],
+                "Assessment title": title,
                 "Due Date": row["Due Date"],
                 **manual,
             }
@@ -155,6 +241,7 @@ def _merge_tracker(existing: pd.DataFrame, incoming: pd.DataFrame) -> pd.DataFra
         return pd.DataFrame(columns=COLUMNS)
 
     df = pd.DataFrame(merged_rows, columns=COLUMNS)
+    df = _collapse_by_match_key(df)
     df["_sort_date"] = pd.to_datetime(df["Due Date"], errors="coerce")
     df = df.sort_values("_sort_date", na_position="last").drop(columns="_sort_date")
     return df.reset_index(drop=True)
