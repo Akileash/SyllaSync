@@ -101,6 +101,8 @@ def fetch_canvas_assignments() -> list[dict[str, Any]]:
                     "Course": course_name,
                     "Task": getattr(assignment, "name", "Untitled Assignment"),
                     "Due Date": _format_due_date(due_at) or "No due date",
+                    "Canvas ID": getattr(assignment, "id", None),
+                    "assignment_id": getattr(assignment, "id", None),
                 }
             )
 
