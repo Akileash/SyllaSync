@@ -67,6 +67,10 @@ def _base_format(workbook: xlsxwriter.Workbook, **extra) -> xlsxwriter.Format:
 def export_dashboard(input_path: Path, output_path: Path) -> pd.DataFrame:
     """Build the interactive Excel dashboard."""
     df = load_and_clean(input_path)
+    # Sort soonest-due first (fewest days until due at the top)
+    df = df.sort_values("Due Date", ascending=True, na_position="last").reset_index(
+        drop=True
+    )
 
     workbook = xlsxwriter.Workbook(str(output_path))
     worksheet = workbook.add_worksheet(SHEET_NAME)
