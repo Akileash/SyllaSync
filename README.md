@@ -1,145 +1,226 @@
 # Sylla Sync
 
-Sync university assignments from **Canvas** and **syllabus PDFs** into an Excel dashboard or a **Google Sheets** assignment tracker. Optional **Google Calendar** events and **Discord** weekly digest included.
+Sync university assignments from **Canvas** + **syllabus PDFs** into:
+
+- Google Sheets (assignment tracker)
+- Google Calendar (due-date events)
+- Discord (7-day digest)
+- or a local Excel dashboard
 
 **Vibe coded** with Cursor.
 
-**Requirements:** Python 3.10+, a Canvas account, and (for Google Sheets) a Google account.
+Paste this README into an AI coding assistant and ask it to set Sylla Sync up for you.
 
-## Quick start
+---
+
+## What you need before starting
+
+| Item | Where to get it |
+|---|---|
+| Python 3.10+ | https://www.python.org/downloads/ |
+| Canvas API token | Canvas → Account → Settings → **New Access Token** |
+| Gemini API key (optional but useful) | https://aistudio.google.com/apikey |
+| Google account | for Sheets + Calendar |
+| Discord webhook (optional) | Server Settings → Integrations → Webhooks |
+
+---
+
+## AI setup prompt (copy/paste)
+
+```text
+Set up Sylla Sync on my machine using this README.
+
+Do these steps in order:
+1. Create a venv and install requirements.txt
+2. Copy .env.example → .env and credentials.json.example → credentials.json
+3. Help me fill .env with my Canvas / Gemini / Google / Discord values
+4. Walk me through Google Cloud service-account + Calendar API setup
+5. Share my Google Sheet and Calendar with the service account email
+6. Run: python test_sheets.py
+7. Run: python main.py --all
+8. Confirm .env and credentials.json are gitignored and never committed
+```
+
+---
+
+## 1) Install
 
 ```bash
-git clone <your-repo-url>
+git clone https://github.com/Akileash/SyllaSync.git
 cd SyllaSync
+
 python -m venv venv
-source venv/bin/activate          # Windows: venv\Scripts\activate
+# Windows:
+venv\Scripts\activate
+# macOS/Linux:
+source venv/bin/activate
+
 pip install -r requirements.txt
-cp .env.example .env                # Windows: copy .env.example .env
+```
+
+Copy templates:
+
+```bash
+# Windows
+copy .env.example .env
+copy credentials.json.example credentials.json
+
+# macOS/Linux
+cp .env.example .env
 cp credentials.json.example credentials.json
 ```
 
-1. Fill in `.env` with your own API keys (see below).
-2. For Google Sheets: copy the [HHS Assignment Tracker](https://docs.google.com/spreadsheets/d/1ALoho_3oHCHn7qsL3HuwOTkCWu2Rz3ZojE3SVflN65c/copy), create a service account, save the key as `credentials.json`, and share your sheet with the service account email as **Editor**.
-3. Test Google Sheets: `python test_sheets.py`
-4. Run a sync: `python main.py --google`
+---
 
-## Commands
+## 2) Fill `.env`
 
-| Command | Output |
+Open `.env` and replace placeholders:
+
+```env
+CANVAS_URL=https://your-university.instructure.com
+CANVAS_TOKEN=your_canvas_api_token
+GEMINI_API_KEY=your_gemini_api_key
+GOOGLE_SHEET_ID=your_google_sheet_id
+GOOGLE_CALENDAR_ID=your_email@gmail.com
+DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/...
+ALLOWED_COURSES=MATH 201,MATH 209,MAT E 201,ECE 202,ECE 210,ENGG 299
+```
+
+Tips:
+
+- `CANVAS_URL` is your school Canvas homepage URL
+- `ALLOWED_COURSES` filters which classes sync (leave blank for all active courses)
+- `GOOGLE_CALENDAR_ID` is usually your Gmail address (not an iCal URL)
+
+---
+
+## 3) Google Cloud + credentials.json (one-time)
+
+1. Open [Google Cloud Console](https://console.cloud.google.com/)
+2. Create/select a project
+3. Enable both APIs:
+   - [Google Sheets API](https://console.cloud.google.com/apis/library/sheets.googleapis.com)
+   - [Google Calendar API](https://console.cloud.google.com/apis/library/calendar-json.googleapis.com)
+4. Create a **service account** → Keys → Add key → JSON
+5. Save the downloaded JSON as `credentials.json` in the project root
+6. Open `credentials.json` and copy `client_email` (looks like `name@project.iam.gserviceaccount.com`)
+
+---
+
+## 4) Google Sheets setup
+
+1. Make a copy of the [HHS Assignment Tracker](https://docs.google.com/spreadsheets/d/1ALoho_3oHCHn7qsL3HuwOTkCWu2Rz3ZojE3SVflN65c/copy)
+2. Share that copy with your service account `client_email` as **Editor**
+3. Copy the Sheet ID from the URL:
+   `https://docs.google.com/spreadsheets/d/THIS_IS_THE_ID/edit`
+4. Put it in `.env` as `GOOGLE_SHEET_ID=...`
+5. Test:
+
+```bash
+python test_sheets.py
+```
+
+---
+
+## 5) Google Calendar setup
+
+1. Open [Google Calendar](https://calendar.google.com)
+2. Hover your calendar → **⋮** → **Settings and sharing**
+3. **Share with specific people** → add the same `client_email`
+4. Permission: **Make changes to events** → Send
+5. Set in `.env`:
+
+```env
+GOOGLE_CALENDAR_ID=your_email@gmail.com
+```
+
+---
+
+## 6) Discord setup (optional)
+
+1. Discord → Server Settings → Integrations → Webhooks → New Webhook
+2. Copy webhook URL into `DISCORD_WEBHOOK_URL` in `.env`
+
+---
+
+## 7) Run it
+
+Full pipeline (Sheets + Calendar + Discord):
+
+```bash
+python main.py --all
+```
+
+Useful commands:
+
+| Command | What it does |
 |---|---|
-| `python main.py` | Local Excel → `Sylla_Sync_Dashboard.xlsx` |
-| `python main.py --google` | Push to Google Sheet **Masterlist** tab |
-| `python main.py --all` | Full pipeline: Sheets + Calendar + Discord |
-| `python main.py --google --calendar --weekly` | Same as `--all` (flags combined) |
-| `python main.py --google --calendar` | Google Sheet + Calendar due-date events |
-| `python main.py --calendar` | Excel dashboard + Calendar events |
-| `python main.py --weekly` | Excel export + Discord 7-day digest |
-| `python main.py --google --weekly` | Google Sheet + Discord digest |
-| `python main.py --google --course "MATH 201"` | Download syllabi for one course, then sync |
-| `python main.py --google --skip-canvas-download` | Sync local `syllabi/` PDFs only |
-| `python test_sheets.py` | Verify Google Sheets connection |
+| `python main.py --all` | Full sync |
+| `python main.py --google` | Sheets only |
+| `python main.py --google --calendar` | Sheets + Calendar |
+| `python main.py --weekly` | Excel + Discord digest |
+| `python main.py --google --skip-canvas-download` | Use local `syllabi/` PDFs only |
+| `python main.py --course "MATH 201"` | Limit syllabus download to one course |
 
-## Environment variables
+On each run you should see logs like:
 
-Copy `.env.example` → `.env` and fill in your values:
+```text
+[INFO] Retrieved: X Canvas items, Y Syllabus items
+[INFO] Discarded: Z duplicate entries
+[INFO] Calendar: A created, B updated, C unchanged, D duplicates deleted
+```
 
-| Variable | Required | Description |
-|---|---|---|
-| `CANVAS_URL` | Yes | Your school's Canvas URL (e.g. `https://canvas.university.edu`) |
-| `CANVAS_TOKEN` | Yes | Canvas → **Account → Settings → Approved Integrations** |
-| `GEMINI_API_KEY` | Yes* | [Google AI Studio](https://aistudio.google.com/apikey) — for PDF parsing |
-| `GOOGLE_SHEET_ID` | For `--google` | The ID from your sheet URL: `docs.google.com/spreadsheets/d/SHEET_ID/edit` |
-| `GOOGLE_CALENDAR_ID` | For `--calendar` | Your Gmail address, or a dedicated calendar ID |
-| `DISCORD_WEBHOOK_URL` | For `--weekly` | Discord server webhook URL |
+---
 
-\*Structured syllabus/schedule PDFs (e.g. weekly schedules) are parsed without Gemini. Gemini is used as a fallback for other PDF formats.
+## How duplicates are prevented
 
-## Google Sheets setup
+- Each assignment gets a stable `Task_ID`
+- Canvas wins over syllabus when both describe the same task
+- Google Sheets upserts by key and preserves your Status/Priority edits
+- Google Calendar matches by `task_id` + fuzzy title (`Assignment #1 ...`) and **deletes leftover Sylla Sync duplicates**
+- Lecture/lab schedule events on your calendar are never touched
 
-Targets the **Masterlist** tab of the [HHS Assignment Tracker](https://docs.google.com/spreadsheets/d/1ALoho_3oHCHn7qsL3HuwOTkCWu2Rz3ZojE3SVflN65c/copy) template (free, by [@HHSStudentLife](https://linktr.ee/hhsstudentlife)).
+---
 
-1. Open the template link above and click **Make a copy**.
-2. [Create a Google Cloud service account](https://console.cloud.google.com/iam-admin/serviceaccounts) and download the JSON key → save as `credentials.json`.
-3. Share your copy of the sheet with the `client_email` from that file (Editor access).
-4. Copy the sheet ID from the URL into `GOOGLE_SHEET_ID` in `.env`.
-5. Run `python test_sheets.py` to confirm.
+## Safety (do not skip)
 
-**What Sylla Sync writes (columns B–H):**
+Never commit these files:
 
-| Column | Content |
-|---|---|
-| B — STATUS | Defaults to `Not Started` (preserved on re-sync) |
-| C/D — DUE DATE | Calendar date (column D feeds template formulas) |
-| E — DUE TIME | Time if available |
-| F — CLASS | Course code/name |
-| G — TYPE | Auto-inferred (Exam, Quiz, Homework, etc.) |
-| H — ASSIGNMENT | Title |
+- `.env`
+- `credentials.json`
+- syllabus PDFs in `syllabi/`
 
-Columns **I onward** (formulas, charts) are never modified.
+They are already listed in `.gitignore`.
 
-## Google Calendar setup
-
-Uses the **same** `credentials.json` service account as Sheets.
-
-1. In [Google Cloud Console](https://console.cloud.google.com/apis/library/calendar-json.googleapis.com) enable the **Google Calendar API** for your project.
-2. Open [Google Calendar](https://calendar.google.com) → hover your calendar → **⋮** → **Settings and sharing**.
-3. Under **Share with specific people or groups**, add the `client_email` from `credentials.json`.
-4. Set permission to **Make changes to events** → **Send**.
-5. In `.env`, set:
-   ```
-   GOOGLE_CALENDAR_ID=your_email@gmail.com
-   ```
-   Or use a dedicated calendar: Settings → **Integrate calendar** → copy **Calendar ID**.
-6. Run:
-   ```bash
-   python main.py --google --calendar
-   ```
-
-Re-runs are safe: events with the same title and date are updated, not duplicated. Each event is all-day with a 24-hour popup reminder.
-
-## Syllabus PDFs
-
-**Option A — Manual:** Drop PDFs into `syllabi/`.
-
-**Option B — From Canvas:** Sylla Sync auto-downloads `Syllabus.pdf` and weekly schedule files from course modules on each run. Use `--course "MATH 201"` to limit downloads to one course.
-
-Parsed assignments are merged with Canvas data. Re-syncing preserves your manual **Status**, **Priority**, and **Estimated time** edits.
-
-## Discord digest (optional)
-
-1. In Discord: **Server Settings → Integrations → Webhooks → New Webhook**
-2. Name it (e.g. "Sylla Sync"), pick a channel, and copy the webhook URL
-3. Add it to `.env` as `DISCORD_WEBHOOK_URL`, then run `python main.py --google --weekly`
+---
 
 ## Troubleshooting
 
 | Problem | Fix |
 |---|---|
-| `Missing required environment variable` | Check `.env` — values must not be placeholder text |
-| `Permission denied` on Google Sheets | Share your sheet with the service account `client_email` as Editor |
-| Calendar `403` / `Not Found` | Share the calendar with `client_email` (**Make changes to events**); set `GOOGLE_CALENDAR_ID`; enable Calendar API |
-| `Worksheet 'Masterlist' not found` | Use the [HHS Assignment Tracker](https://docs.google.com/spreadsheets/d/1ALoho_3oHCHn7qsL3HuwOTkCWu2Rz3ZojE3SVflN65c/copy) template |
-| `Canvas fetch failed` | Verify `CANVAS_URL` and `CANVAS_TOKEN`; classes may not be published yet |
-| `429` / quota error (Gemini) | Free tier limit hit — wait 24h or rely on structured PDF parsers |
-| `No PDF files found` | Add PDFs to `syllabi/` or run without `--skip-canvas-download` |
-| `ModuleNotFoundError` | Activate venv, then `pip install -r requirements.txt` |
-| Discord digest not sending | Check `DISCORD_WEBHOOK_URL` in `.env` and run with `--weekly` |
+| Missing env var | Fill real values in `.env` (not placeholder text) |
+| Sheets permission error | Share sheet with service account email as Editor |
+| Calendar 403 / Not Found | Enable Calendar API + share calendar as **Make changes to events** |
+| Duplicate calendar events | Re-run `python main.py --google --calendar` (cleanup is automatic) |
+| Gemini 429 quota | Wait or rely on built-in PDF parsers for structured syllabi |
+| No PDFs found | Add files to `syllabi/` or remove `--skip-canvas-download` |
+| ModuleNotFoundError | Activate venv, then `pip install -r requirements.txt` |
+
+---
 
 ## Project layout
 
-```
+```text
 SyllaSync/
-├── main.py                   # CLI entry point
+├── main.py                   # CLI entry point (--all pipeline)
+├── dedupe_module.py          # Task_ID + anti-duplicate engine
 ├── canvas_module.py          # Canvas assignments
-├── canvas_syllabus_module.py # Download syllabi from Canvas modules
-├── syllabus_module.py        # PDF parsing (regex + Gemini)
-├── google_sheets_module.py   # Google Sheets → Masterlist
-├── google_calendar_module.py # Google Calendar due-date events
-├── sheets_module.py          # Excel merge writer
-├── export_dashboard.py       # Excel dashboard formatter
-├── discord_module.py         # Discord webhook digest
+├── canvas_syllabus_module.py # Download syllabi from Canvas
+├── syllabus_module.py        # PDF parsing
+├── google_sheets_module.py   # Google Sheets sync
+├── google_calendar_module.py # Google Calendar sync
+├── discord_module.py         # Discord digest
 ├── config.py                 # Loads .env
-├── .env.example              # Template
-├── credentials.json.example  # Template
-└── syllabi/                  # Syllabus PDFs
+├── .env.example
+└── credentials.json.example
 ```
