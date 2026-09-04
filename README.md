@@ -2,7 +2,7 @@
 
 Sync university assignments from **Canvas** and **syllabus PDFs** into an Excel dashboard or a **Google Sheets** assignment tracker. Optional **Google Calendar** events and **Discord** weekly digest included.
 
-📁 **Portfolio case study:** [portfolio/PORTFOLIO.md](portfolio/PORTFOLIO.md)
+**Vibe coded** with Cursor.
 
 **Requirements:** Python 3.10+, a Canvas account, and (for Google Sheets) a Google account.
 
