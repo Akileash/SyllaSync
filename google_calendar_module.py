@@ -1,6 +1,9 @@
 """
 Push Sylla Sync assignments to Google Calendar as all-day events.
 
+Idempotent upserts use extendedProperties.private.task_id so re-runs
+update or skip instead of creating duplicates.
+
 Requires:
   - GOOGLE_CALENDAR_ID in .env / local.env (email or calendar ID, not an iCal URL)
   - credentials.json service-account key in the project root
@@ -22,6 +25,7 @@ from googleapiclient.errors import HttpError
 
 from config import BASE_DIR, GOOGLE_CALENDAR_ID
 from date_utils import normalize_calendar_date
+from dedupe_module import TASK_ID_COL, ensure_task_id
 
 logger = logging.getLogger(__name__)
 
@@ -31,12 +35,11 @@ SCOPES = [
     "https://www.googleapis.com/auth/calendar",
 ]
 
-# Google Calendar colorIds by priority
 PRIORITY_COLOR = {
-    "high": "11",    # Red
-    "medium": "5",   # Yellow
+    "high": "11",
+    "medium": "5",
     "med": "5",
-    "low": "9",      # Blue
+    "low": "9",
 }
 
 
@@ -70,7 +73,6 @@ def _authenticate():
 
 
 def _priority_color(priority: str) -> str | None:
-    """Map a Priority cell value to a Google Calendar colorId."""
     return PRIORITY_COLOR.get(priority.strip().lower())
 
 
@@ -85,10 +87,7 @@ def _build_event(record: dict[str, Any]) -> dict[str, Any] | None:
     if not iso_date or not title:
         return None
 
-    # e.g. "MATH 201 - Midterm Exam"
     summary = f"{course} - {title}" if course else title
-
-    # All-day events: end.date is exclusive (must be the day AFTER start).
     end_date = (
         datetime.strptime(iso_date, "%Y-%m-%d") + timedelta(days=1)
     ).strftime("%Y-%m-%d")
@@ -99,10 +98,20 @@ def _build_event(record: dict[str, Any]) -> dict[str, Any] | None:
         record.get("Estimated time dedicated to task", "") or ""
     ).strip() or "—"
 
+    task_id = str(record.get(TASK_ID_COL) or "").strip() or ensure_task_id(
+        {
+            **record,
+            "Task": title,
+            "Course": course,
+            "Due Date": due_raw,
+        }
+    )
+
     event: dict[str, Any] = {
         "summary": summary,
         "description": (
             f"Source: Sylla Sync\n"
+            f"Task ID: {task_id}\n"
             f"Priority: {priority}\n"
             f"Status: {status}\n"
             f"Estimated Time: {est_time}"
@@ -113,6 +122,12 @@ def _build_event(record: dict[str, Any]) -> dict[str, Any] | None:
             "useDefault": False,
             "overrides": [{"method": "popup", "minutes": 24 * 60}],
         },
+        "extendedProperties": {
+            "private": {
+                "task_id": task_id,
+                "syllasync": "1",
+            }
+        },
     }
 
     color = _priority_color(priority)
@@ -122,14 +137,27 @@ def _build_event(record: dict[str, Any]) -> dict[str, Any] | None:
     return event
 
 
-def _get_existing_by_summary(service, calendar_id: str) -> dict[str, str]:
-    """
-    Fetch existing events and map summary → event_id.
+def _event_start_date(item: dict[str, Any]) -> str:
+    start = item.get("start") or {}
+    if start.get("date"):
+        return start["date"]
+    if start.get("dateTime"):
+        return str(start["dateTime"])[:10]
+    return ""
 
-    Matching on summary alone so a due-date change in Canvas updates
-    the same calendar event instead of creating a duplicate.
+
+def _get_existing_events(service, calendar_id: str) -> dict[str, dict[str, Any]]:
     """
-    existing: dict[str, str] = {}
+    Index existing events by task_id (preferred) and by summary||date fallback.
+
+    Returns:
+        {
+          "by_task_id": {task_id: {id, summary, start_date, raw}},
+          "by_summary_date": {f"{summary}||{date}": {...}},
+        }
+    """
+    by_task_id: dict[str, dict[str, Any]] = {}
+    by_summary_date: dict[str, dict[str, Any]] = {}
     page_token = None
     now = datetime.utcnow()
     time_min = (now - timedelta(days=90)).isoformat() + "Z"
@@ -152,31 +180,53 @@ def _get_existing_by_summary(service, calendar_id: str) -> dict[str, str]:
 
         for item in result.get("items", []):
             summary = (item.get("summary") or "").strip()
-            if summary and summary not in existing:
-                existing[summary] = item["id"]
+            start_date = _event_start_date(item)
+            private = ((item.get("extendedProperties") or {}).get("private")) or {}
+            task_id = str(private.get("task_id") or "").strip()
+
+            meta = {
+                "id": item["id"],
+                "summary": summary,
+                "start_date": start_date,
+                "task_id": task_id,
+                "raw": item,
+            }
+            if task_id and task_id not in by_task_id:
+                by_task_id[task_id] = meta
+            if summary and start_date:
+                by_summary_date.setdefault(f"{summary}||{start_date}", meta)
+            elif summary:
+                by_summary_date.setdefault(f"{summary}||", meta)
 
         page_token = result.get("nextPageToken")
         if not page_token:
             break
 
-    return existing
+    return {"by_task_id": by_task_id, "by_summary_date": by_summary_date}
+
+
+def _events_equivalent(existing_meta: dict[str, Any], event: dict[str, Any]) -> bool:
+    """True if summary + start date already match (no patch needed)."""
+    return (
+        existing_meta.get("summary") == event.get("summary")
+        and existing_meta.get("start_date") == (event.get("start") or {}).get("date")
+    )
 
 
 def push_to_google_calendar(df: pd.DataFrame) -> dict[str, int]:
     """
-    Create or update Google Calendar events from a Sylla Sync DataFrame.
-
-    Deduplicates by event Summary: existing → update, missing → insert.
+    Create / update / skip Google Calendar events using Task_ID upserts.
 
     Returns:
-        Counts dict with keys: added, updated, skipped, failed.
+        Counts: created, updated, unchanged, skipped, failed
+        (also aliases added→created for older callers).
     """
     print(f"\n--- Google Calendar sync → {GOOGLE_CALENDAR_ID} ---")
 
     try:
         service = _authenticate()
         calendar_id = GOOGLE_CALENDAR_ID
-        existing = _get_existing_by_summary(service, calendar_id)
+        existing = _get_existing_events(service, calendar_id)
     except HttpError as exc:
         status = getattr(exc.resp, "status", None)
         if status in (403, 404):
@@ -189,9 +239,24 @@ def push_to_google_calendar(df: pd.DataFrame) -> dict[str, int]:
             ) from exc
         raise
 
-    print(f"Found {len(existing)} existing event(s) for dedup by summary.")
+    by_task_id = existing["by_task_id"]
+    by_summary_date = existing["by_summary_date"]
+    print(
+        f"Found {len(by_task_id)} event(s) with task_id, "
+        f"{len(by_summary_date)} summary/date index entries."
+    )
 
-    counts = {"added": 0, "updated": 0, "skipped": 0, "failed": 0}
+    counts = {
+        "created": 0,
+        "updated": 0,
+        "unchanged": 0,
+        "skipped": 0,
+        "failed": 0,
+        # aliases
+        "added": 0,
+    }
+
+    seen_task_ids: set[str] = set()
 
     for record in df.to_dict(orient="records"):
         event = _build_event(record)
@@ -199,27 +264,64 @@ def push_to_google_calendar(df: pd.DataFrame) -> dict[str, int]:
             counts["skipped"] += 1
             continue
 
+        task_id = event["extendedProperties"]["private"]["task_id"]
+        if task_id in seen_task_ids:
+            counts["skipped"] += 1
+            continue
+        seen_task_ids.add(task_id)
+
         summary = event["summary"]
         start_date = event["start"]["date"]
+        match = by_task_id.get(task_id)
+        if not match:
+            match = by_summary_date.get(f"{summary}||{start_date}") or by_summary_date.get(
+                f"{summary}||"
+            )
 
         try:
-            if summary in existing:
-                service.events().update(
-                    calendarId=calendar_id,
-                    eventId=existing[summary],
-                    body=event,
-                ).execute()
-                counts["updated"] += 1
-                print(f"  ~ updated  {summary} ({start_date})")
+            if match:
+                if _events_equivalent(match, event):
+                    # Still patch extendedProperties if legacy event lacked task_id
+                    if not match.get("task_id"):
+                        service.events().patch(
+                            calendarId=calendar_id,
+                            eventId=match["id"],
+                            body={
+                                "extendedProperties": event["extendedProperties"],
+                                "description": event["description"],
+                            },
+                        ).execute()
+                    counts["unchanged"] += 1
+                    print(f"  = unchanged {summary} ({start_date})")
+                else:
+                    service.events().update(
+                        calendarId=calendar_id,
+                        eventId=match["id"],
+                        body=event,
+                    ).execute()
+                    counts["updated"] += 1
+                    print(f"  ~ updated  {summary} ({start_date})")
+                by_task_id[task_id] = {
+                    "id": match["id"],
+                    "summary": summary,
+                    "start_date": start_date,
+                    "task_id": task_id,
+                }
             else:
                 created = (
                     service.events()
                     .insert(calendarId=calendar_id, body=event)
                     .execute()
                 )
-                existing[summary] = created["id"]
+                by_task_id[task_id] = {
+                    "id": created["id"],
+                    "summary": summary,
+                    "start_date": start_date,
+                    "task_id": task_id,
+                }
+                counts["created"] += 1
                 counts["added"] += 1
-                print(f"  + added    {summary} ({start_date})")
+                print(f"  + created  {summary} ({start_date})")
         except HttpError as exc:
             status = getattr(exc.resp, "status", None)
             if status in (403, 404):
@@ -233,16 +335,20 @@ def push_to_google_calendar(df: pd.DataFrame) -> dict[str, int]:
             logger.error("Failed to sync event '%s': %s", summary, exc)
 
     print(
-        f"\nCalendar done — "
-        f"added: {counts['added']}, "
-        f"updated: {counts['updated']}, "
-        f"skipped (no date/title): {counts['skipped']}, "
-        f"failed: {counts['failed']}\n"
+        f"\n[INFO] Calendar: {counts['created']} created, "
+        f"{counts['updated']} updated, {counts['unchanged']} unchanged"
     )
+    if counts["skipped"] or counts["failed"]:
+        print(
+            f"[INFO] Calendar extras — skipped: {counts['skipped']}, "
+            f"failed: {counts['failed']}"
+        )
+    print()
     logger.info(
-        "Calendar sync: +%d ~%d skip=%d fail=%d",
-        counts["added"],
+        "Calendar sync: created=%d updated=%d unchanged=%d skipped=%d failed=%d",
+        counts["created"],
         counts["updated"],
+        counts["unchanged"],
         counts["skipped"],
         counts["failed"],
     )

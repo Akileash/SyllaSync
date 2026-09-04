@@ -237,10 +237,7 @@ def main() -> None:
             print(f"      Warning: syllabus download failed ({exc})")
 
     canvas_data, syllabus_data = fetch_all_data()
-    print(
-        f"      Merged sources — Canvas: {len(canvas_data)}, "
-        f"syllabus: {len(syllabus_data)} raw record(s)."
-    )
+    print("      Sources fetched — running dedupe engine...")
 
     # ------------------------------------------------------------------
     # 2. Google Sheets (--google) or local Excel dashboard
@@ -280,10 +277,9 @@ def main() -> None:
         try:
             counts = push_to_google_calendar(df)
             print(
-                f"      Calendar — added: {counts['added']}, "
-                f"updated: {counts['updated']}, "
-                f"skipped: {counts['skipped']}, "
-                f"failed: {counts['failed']}."
+                f"[INFO] Calendar: {counts.get('created', counts.get('added', 0))} created, "
+                f"{counts.get('updated', 0)} updated, "
+                f"{counts.get('unchanged', 0)} unchanged"
             )
         except GoogleCalendarPermissionError as exc:
             logger.error("Google Calendar permission error: %s", exc)

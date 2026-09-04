@@ -1,7 +1,6 @@
 """Combine assignment data and write to a local Excel assessment tracker."""
 
 import logging
-import re
 from pathlib import Path
 from typing import Any
 
@@ -13,24 +12,33 @@ from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.datavalidation import DataValidation
 
 from config import EXCEL_FILE_PATH
-from course_utils import normalize_course_code
+from dedupe_module import (
+    TASK_ID_COL,
+    dedupe_cross_source,
+    fuzzy_match_key,
+    remember_task_ids,
+    records_to_tracker_frame,
+)
 
 logger = logging.getLogger(__name__)
 
-# "Assignment #1: ...", "Quiz 2", "HW #3" → stable match key within a course
-NUMBERED_TASK_RE = re.compile(
-    r"^(assignment|quiz|exam|lab|homework|hw|project|midterm|final)\s*#?\s*(\d+)\b",
-    re.IGNORECASE,
-)
-
 SHEET_NAME = "Assessment Schedule"
-AUTO_COLUMNS = ["Course", "Assessment title", "Due Date"]
+AUTO_COLUMNS = ["Course", "Assessment title", "Due Date", TASK_ID_COL]
 MANUAL_COLUMNS = [
     "Estimated time dedicated to task",
     "Status",
     "Priority",
 ]
-COLUMNS = AUTO_COLUMNS + MANUAL_COLUMNS
+# Task_ID is tracking-only; written to Excel but not required for display polish
+COLUMNS = [
+    "Course",
+    "Assessment title",
+    "Due Date",
+    "Estimated time dedicated to task",
+    "Status",
+    "Priority",
+    TASK_ID_COL,
+]
 
 TITLE = "Assessment Schedule"
 TITLE_FONT = Font(name="Calibri", bold=True, size=16, color="FFFFFF")
@@ -58,6 +66,7 @@ COLUMN_WIDTHS = {
     "D": 22.0,
     "E": 14.0,
     "F": 12.0,
+    "G": 28.0,  # Task_ID (tracking)
 }
 
 COLUMN_ALIGNMENTS = {
@@ -67,39 +76,22 @@ COLUMN_ALIGNMENTS = {
     "Estimated time dedicated to task": Alignment(horizontal="center", vertical="center"),
     "Status": Alignment(horizontal="center", vertical="center"),
     "Priority": Alignment(horizontal="center", vertical="center"),
+    TASK_ID_COL: Alignment(horizontal="left", vertical="center"),
 }
 
 STATUS_OPTIONS = '"Not started,In Progress,Done"'
 PRIORITY_OPTIONS = '"P 1,P 2,P 3"'
 
 
-def _normalize_title_text(title: Any) -> str:
-    """Lowercase title with punctuation collapsed for comparison."""
-    text = str(title or "").strip().lower()
-    text = re.sub(r"[^\w\s#]+", " ", text)
-    return re.sub(r"\s+", " ", text).strip()
-
-
 def _normalize_key(course: Any, title: Any) -> tuple[str, str]:
     """
     Fuzzy match key so near-duplicate titles collapse.
 
-    Examples that become the same key under ENGG 299:
-      - "Assignment #1: Complete Co-op Expectations Agreement"
-      - "Assignment #1: Co-op Expectations Agreement"
+    Returns a 2-tuple for backward compatibility with google_sheets_module.
     """
-    course_raw = str(course or "").strip()
-    course_key = (normalize_course_code(course_raw) or course_raw).strip().lower()
-
-    title_norm = _normalize_title_text(title)
-    numbered = NUMBERED_TASK_RE.match(title_norm)
-    if numbered:
-        kind = numbered.group(1).lower()
-        if kind == "hw":
-            kind = "homework"
-        return course_key, f"{kind}#{numbered.group(2)}"
-
-    return course_key, title_norm
+    key = fuzzy_match_key(course, title)
+    course_part, _, title_part = key.partition("||")
+    return course_part, title_part
 
 
 def _prefer_title(current: str, candidate: str) -> str:
@@ -115,15 +107,27 @@ def _prefer_title(current: str, candidate: str) -> str:
     return cur
 
 
+def _prefer_task_id(current: Any, candidate: Any) -> str:
+    """Prefer Canvas-backed Task_IDs over syllabus composites."""
+    cur = str(current or "").strip()
+    cand = str(candidate or "").strip()
+    if cand.startswith("canvas_") and not cur.startswith("canvas_"):
+        return cand
+    if cur:
+        return cur
+    return cand
+
+
 def _collapse_by_match_key(df: pd.DataFrame) -> pd.DataFrame:
     """Collapse rows that share the same fuzzy (course, title) match key."""
+    cols = [c for c in COLUMNS if c in df.columns] or list(df.columns)
     if df.empty:
-        return df.reindex(columns=[c for c in COLUMNS if c in df.columns] or list(df.columns))
+        return df.reindex(columns=cols)
 
-    best: dict[tuple[str, str], dict[str, Any]] = {}
+    best: dict[str, dict[str, Any]] = {}
     for _, row in df.iterrows():
-        key = _normalize_key(row.get("Course", ""), row.get("Assessment title", ""))
-        if not key[0] and not key[1]:
+        key = fuzzy_match_key(row.get("Course", ""), row.get("Assessment title", ""))
+        if key == "||":
             continue
 
         if key not in best:
@@ -135,15 +139,20 @@ def _collapse_by_match_key(df: pd.DataFrame) -> pd.DataFrame:
             str(existing.get("Assessment title", "")),
             str(row.get("Assessment title", "")),
         )
-        # Prefer a parseable / newer-looking due date if current is empty
-        if not str(existing.get("Due Date", "")).strip() and str(row.get("Due Date", "")).strip():
+        if TASK_ID_COL in df.columns:
+            existing[TASK_ID_COL] = _prefer_task_id(
+                existing.get(TASK_ID_COL, ""), row.get(TASK_ID_COL, "")
+            )
+        if not str(existing.get("Due Date", "")).strip() and str(
+            row.get("Due Date", "")
+        ).strip():
             existing["Due Date"] = row.get("Due Date", "")
         for col in MANUAL_COLUMNS:
             if col in df.columns and not str(existing.get(col, "")).strip():
                 existing[col] = row.get(col, "")
 
     if not best:
-        return pd.DataFrame(columns=list(df.columns))
+        return pd.DataFrame(columns=cols)
 
     return pd.DataFrame(list(best.values()), columns=list(df.columns))
 
@@ -151,18 +160,17 @@ def _collapse_by_match_key(df: pd.DataFrame) -> pd.DataFrame:
 def _incoming_from_sources(
     canvas_data: list[dict[str, Any]],
     syllabus_data: list[dict[str, Any]],
-) -> pd.DataFrame:
-    """Map Canvas/syllabus records to tracker auto-fill columns."""
-    rows: list[dict[str, Any]] = []
-    for item in canvas_data + syllabus_data:
-        rows.append(
-            {
-                "Course": item.get("Course", ""),
-                "Assessment title": item.get("Task", ""),
-                "Due Date": item.get("Due Date", ""),
-            }
-        )
-    return pd.DataFrame(rows, columns=AUTO_COLUMNS)
+):
+    """
+    Dedupe Canvas + syllabus, then map to tracker auto-fill columns.
+
+    Returns:
+        (incoming DataFrame with Task_ID, DedupStats)
+    """
+    records, stats = dedupe_cross_source(canvas_data, syllabus_data)
+    frame = records_to_tracker_frame(records)
+    # Align to AUTO_COLUMNS (+ Source kept for debugging, dropped later if needed)
+    return frame.reindex(columns=AUTO_COLUMNS + ["Source"]).fillna(""), stats
 
 
 def _load_existing_tracker(path: Path) -> pd.DataFrame:
@@ -185,37 +193,85 @@ def _load_existing_tracker(path: Path) -> pd.DataFrame:
     return pd.DataFrame(columns=COLUMNS)
 
 
+def _sort_by_days_until_due(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Sort assignments soonest-due first (fewest days until due at the top).
+
+    Missing/unparseable dates sink to the bottom.
+    """
+    if df.empty or "Due Date" not in df.columns:
+        return df.reset_index(drop=True)
+
+    out = df.copy()
+    out["_sort_date"] = pd.to_datetime(out["Due Date"], errors="coerce")
+    # Normalize to calendar date so time-of-day doesn't scramble same-day order
+    out["_sort_day"] = out["_sort_date"].dt.normalize()
+    out = out.sort_values(
+        by=["_sort_day", "Course", "Assessment title"],
+        ascending=[True, True, True],
+        na_position="last",
+    )
+    return out.drop(columns=["_sort_date", "_sort_day"]).reset_index(drop=True)
+
+
 def _merge_tracker(existing: pd.DataFrame, incoming: pd.DataFrame) -> pd.DataFrame:
     """
     Merge synced data with the existing tracker.
 
-    - Matching rows (fuzzy title key): update auto columns, keep manual columns.
+    - Matching rows (Task_ID or fuzzy title key): update auto columns, keep manual columns.
     - New rows: add with blank manual columns.
     - Rows only in existing: keep (preserves completed/historical entries).
     - Near-duplicate titles within the same course are collapsed.
     """
-    existing = _collapse_by_match_key(existing.reindex(columns=COLUMNS).fillna(""))
-    incoming = _collapse_by_match_key(incoming.reindex(columns=AUTO_COLUMNS).fillna(""))
+    existing = existing.reindex(columns=COLUMNS).fillna("")
+    incoming = incoming.reindex(
+        columns=[c for c in AUTO_COLUMNS + ["Source"] if c in incoming.columns or c in AUTO_COLUMNS]
+    ).fillna("")
+    for col in AUTO_COLUMNS:
+        if col not in incoming.columns:
+            incoming[col] = ""
 
-    manual_by_key: dict[tuple[str, str], dict[str, Any]] = {}
-    existing_title_by_key: dict[tuple[str, str], str] = {}
+    existing = _collapse_by_match_key(existing)
+    incoming = _collapse_by_match_key(incoming)
+
+    manual_by_key: dict[str, dict[str, Any]] = {}
+    manual_by_task_id: dict[str, dict[str, Any]] = {}
+    existing_title_by_key: dict[str, str] = {}
+    existing_task_id_by_key: dict[str, str] = {}
+
     for _, row in existing.iterrows():
-        key = _normalize_key(row["Course"], row["Assessment title"])
-        if not key[0] and not key[1]:
+        key = fuzzy_match_key(row["Course"], row["Assessment title"])
+        if key == "||":
             continue
-        manual_by_key[key] = {col: row.get(col, "") for col in MANUAL_COLUMNS}
+        manual = {col: row.get(col, "") for col in MANUAL_COLUMNS}
+        manual_by_key[key] = manual
         existing_title_by_key[key] = str(row.get("Assessment title", ""))
+        task_id = str(row.get(TASK_ID_COL, "") or "").strip()
+        if task_id:
+            manual_by_task_id[task_id] = manual
+            existing_task_id_by_key[key] = task_id
 
     merged_rows: list[dict[str, Any]] = []
-    incoming_keys: set[tuple[str, str]] = set()
+    incoming_keys: set[str] = set()
+    incoming_task_ids: set[str] = set()
 
     for _, row in incoming.iterrows():
-        key = _normalize_key(row["Course"], row["Assessment title"])
-        if not key[0] and not key[1]:
+        key = fuzzy_match_key(row["Course"], row["Assessment title"])
+        if key == "||":
             continue
 
+        task_id = str(row.get(TASK_ID_COL, "") or "").strip() or existing_task_id_by_key.get(
+            key, ""
+        )
         incoming_keys.add(key)
-        manual = manual_by_key.get(key, {col: "" for col in MANUAL_COLUMNS})
+        if task_id:
+            incoming_task_ids.add(task_id)
+
+        manual = (
+            manual_by_task_id.get(task_id)
+            or manual_by_key.get(key)
+            or {col: "" for col in MANUAL_COLUMNS}
+        )
         title = _prefer_title(
             existing_title_by_key.get(key, ""),
             str(row.get("Assessment title", "")),
@@ -225,15 +281,17 @@ def _merge_tracker(existing: pd.DataFrame, incoming: pd.DataFrame) -> pd.DataFra
                 "Course": row["Course"],
                 "Assessment title": title,
                 "Due Date": row["Due Date"],
+                TASK_ID_COL: task_id,
                 **manual,
             }
         )
 
     for _, row in existing.iterrows():
-        key = _normalize_key(row["Course"], row["Assessment title"])
-        if not key[0] and not key[1]:
+        key = fuzzy_match_key(row["Course"], row["Assessment title"])
+        if key == "||":
             continue
-        if key in incoming_keys:
+        task_id = str(row.get(TASK_ID_COL, "") or "").strip()
+        if key in incoming_keys or (task_id and task_id in incoming_task_ids):
             continue
         merged_rows.append({col: row.get(col, "") for col in COLUMNS})
 
@@ -242,9 +300,9 @@ def _merge_tracker(existing: pd.DataFrame, incoming: pd.DataFrame) -> pd.DataFra
 
     df = pd.DataFrame(merged_rows, columns=COLUMNS)
     df = _collapse_by_match_key(df)
-    df["_sort_date"] = pd.to_datetime(df["Due Date"], errors="coerce")
-    df = df.sort_values("_sort_date", na_position="last").drop(columns="_sort_date")
-    return df.reset_index(drop=True)
+    df = _sort_by_days_until_due(df)
+    remember_task_ids(df)
+    return df
 
 
 def _apply_title_row(ws) -> int:
@@ -400,7 +458,10 @@ def update_sheet(
     """
     output_path = Path(EXCEL_FILE_PATH)
     existing = _load_existing_tracker(output_path)
-    incoming = _incoming_from_sources(canvas_data, syllabus_data)
+    incoming, stats = _incoming_from_sources(canvas_data, syllabus_data)
+    from dedupe_module import print_dedup_stats
+
+    print_dedup_stats(stats)
 
     if incoming.empty and existing.empty:
         logger.warning("No assignment data to write.")

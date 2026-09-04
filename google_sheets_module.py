@@ -22,12 +22,21 @@ from gspread.exceptions import APIError, SpreadsheetNotFound
 
 from config import BASE_DIR, GOOGLE_SHEET_ID
 from date_utils import format_internal_datetime, format_sheet_date, format_sheet_time
+from dedupe_module import (
+    TASK_ID_COL,
+    ensure_task_id,
+    load_task_state,
+    print_dedup_stats,
+    remember_task_ids,
+    resolve_persisted_task_id,
+    syllabus_task_id,
+)
 from sheets_module import _normalize_key
 
 logger = logging.getLogger(__name__)
 
 # Sylla Sync internal schema (used for merge + Discord digest)
-COLUMNS = [
+DISPLAY_COLUMNS = [
     "Course",
     "Assessment title",
     "Due Date",
@@ -35,6 +44,7 @@ COLUMNS = [
     "Status",
     "Priority",
 ]
+COLUMNS = DISPLAY_COLUMNS + [TASK_ID_COL]
 
 # HHS Assignment Tracker — Masterlist layout
 MASTERLIST_SHEET = "Masterlist"
@@ -188,6 +198,7 @@ def _row_to_internal(row_values: list[Any], row_number: int) -> dict[str, Any] |
         "Estimated time dedicated to task": "",
         "Status": _map_status_to_template(cells[COL_STATUS - 1]),
         "Priority": "",
+        TASK_ID_COL: "",
     }
 
 
@@ -210,23 +221,34 @@ def load_from_google_sheet() -> pd.DataFrame:
     """
     Read existing Masterlist rows into Sylla Sync's internal DataFrame format.
 
+    Restores Task_ID from the local persistence map when possible so Calendar
+    upserts stay stable across runs (Masterlist itself has no Task_ID column).
+
     Returns:
         DataFrame with COLUMNS schema (no _row metadata).
     """
     worksheet = _open_masterlist(_authenticate())
     all_values = worksheet.get_all_values()
+    state = load_task_state()
 
     records: list[dict[str, Any]] = []
     for row_idx in range(DATA_START_ROW - 1, len(all_values)):
         parsed = _row_to_internal(all_values[row_idx], row_idx + 1)
-        if parsed:
-            records.append(parsed)
+        if not parsed:
+            continue
+        fallback = syllabus_task_id(
+            parsed["Course"], parsed["Assessment title"], parsed["Due Date"]
+        )
+        parsed[TASK_ID_COL] = resolve_persisted_task_id(
+            parsed["Course"], parsed["Assessment title"], fallback, state
+        )
+        records.append(parsed)
 
     if not records:
         return pd.DataFrame(columns=COLUMNS)
 
     df = pd.DataFrame(records)
-    return df[COLUMNS].fillna("")
+    return df.reindex(columns=COLUMNS).fillna("")
 
 
 def _load_masterlist_with_rows(
@@ -292,42 +314,30 @@ def _write_masterlist_rows(
     next_empty_row: int,
 ) -> int:
     """
-    Write merged data to Masterlist columns B–H without touching formula columns.
-
-    Collapses fuzzy-duplicate rows: keeps one row per assignment, clears extras.
+    Write merged data to Masterlist columns B–H, ordered by days until due
+    (soonest at the top). Formula columns (I+) are left untouched.
 
     Returns:
-        Number of rows written or updated.
+        Number of rows written.
     """
+    from sheets_module import _sort_by_days_until_due
+
     if merged_df.empty:
         logger.warning("No assignment data to write to Masterlist.")
         return 0
 
-    updates: list[dict[str, Any]] = []
-    clear_rows: list[int] = []
-    append_row = next_empty_row
-    written = 0
-    min_row = None
-    max_row = None
-    used_keys: set[tuple[str, str]] = set()
+    sorted_df = _sort_by_days_until_due(merged_df)
 
-    for record in merged_df.to_dict(orient="records"):
+    updates: list[dict[str, Any]] = []
+    written = 0
+
+    for offset, record in enumerate(sorted_df.to_dict(orient="records")):
         key = _normalize_key(record["Course"], record["Assessment title"])
         if not key[0] and not key[1]:
             continue
 
-        used_keys.add(key)
+        target_row = DATA_START_ROW + written
         row_values = _internal_to_masterlist_row(record)
-        row_list = existing_rows.get(key, [])
-
-        if row_list:
-            target_row = row_list[0]
-            # Extra near-duplicate rows for this assignment → clear
-            clear_rows.extend(row_list[1:])
-        else:
-            target_row = append_row
-            append_row += 1
-
         updates.append(
             {
                 "range": f"B{target_row}:H{target_row}",
@@ -335,35 +345,50 @@ def _write_masterlist_rows(
             }
         )
         written += 1
-        min_row = target_row if min_row is None else min(min_row, target_row)
-        max_row = target_row if max_row is None else max(max_row, target_row)
 
-        existing_rows[key] = [target_row]
+    # Clear leftover data rows below the newly written block (old unsorted / dup rows)
+    clear_until = max(next_empty_row - 1, DATA_START_ROW + written - 1)
+    for row_number in range(DATA_START_ROW + written, clear_until + 1):
+        updates.append(
+            {
+                "range": f"B{row_number}:H{row_number}",
+                "values": [[""] * 7],
+            }
+        )
 
-    # Clear any leftover fuzzy duplicates that were collapsed out of merged_df
-    for key, rows in existing_rows.items():
-        if key in used_keys:
-            continue
-        # Only auto-clear when multiple sheet rows share one fuzzy key
-        # (true orphans that are unique historical rows are preserved).
-        if len(rows) > 1:
-            # Keep the first, clear the rest
-            clear_rows.extend(rows[1:])
+    # Also clear any previously occupied rows that sit above clear_until but
+    # were tracked as existing beyond the contiguous rewrite window.
+    occupied = {
+        row for rows in existing_rows.values() for row in rows
+    }
+    for row_number in occupied:
+        if row_number >= DATA_START_ROW + written:
+            updates.append(
+                {
+                    "range": f"B{row_number}:H{row_number}",
+                    "values": [[""] * 7],
+                }
+            )
+
+    # Deduplicate clear/write ranges — last write wins; prefer keeping data writes
+    # by putting clears first then data updates... actually data is already first.
+    # Collapse duplicate ranges keeping the last entry.
+    by_range: dict[str, dict[str, Any]] = {}
+    for item in updates:
+        by_range[item["range"]] = item
+    updates = list(by_range.values())
 
     if updates:
         worksheet.batch_update(updates, value_input_option="USER_ENTERED")
 
-    cleared = 0
-    for row_number in sorted(set(clear_rows)):
-        _clear_masterlist_row(worksheet, row_number)
-        cleared += 1
-
-    if cleared:
-        logger.info("Cleared %d duplicate Masterlist row(s).", cleared)
-        print(f"      Cleared {cleared} duplicate Google Sheet row(s).")
-
-    if written and min_row and max_row:
-        _apply_date_column_format(worksheet, min_row, max_row)
+    if written:
+        _apply_date_column_format(
+            worksheet, DATA_START_ROW, DATA_START_ROW + written - 1
+        )
+        logger.info(
+            "Masterlist rewritten in days-until-due order (%d row(s)).", written
+        )
+        print(f"      Sorted Masterlist by days until due ({written} row(s)).")
 
     return written
 
@@ -404,7 +429,8 @@ def push_to_google_sheet(df: pd.DataFrame) -> pd.DataFrame:
     """
     Merge and push a DataFrame to the Masterlist worksheet.
 
-    Only columns B, C, E, F, G, H are written. Formula columns (I+) are preserved.
+    Only columns B–H are written. Formula columns (I+) are preserved.
+    Task_ID is kept on the returned DataFrame (and local state) for Calendar.
 
     Returns:
         The merged DataFrame in Sylla Sync's internal format.
@@ -412,6 +438,11 @@ def push_to_google_sheet(df: pd.DataFrame) -> pd.DataFrame:
     prepared = df.copy()
     prepared.columns = prepared.columns.str.strip()
     prepared = prepared.reindex(columns=COLUMNS).fillna("")
+    # Ensure every row has a Task_ID before writing state / returning
+    prepared[TASK_ID_COL] = prepared.apply(
+        lambda row: ensure_task_id(row.to_dict()), axis=1
+    )
+    remember_task_ids(prepared)
 
     try:
         client = _authenticate()
@@ -453,14 +484,16 @@ def push_from_records(
     """
     Build a DataFrame from sync records, merge with existing Masterlist data, and push.
 
-    If existing_df is not provided, loads current rows from the Masterlist sheet.
+    Uses the dedupe engine (Canvas wins over syllabus) and preserves manual
+    Status/Priority via Task_ID / fuzzy key matching.
     """
-    from sheets_module import _incoming_from_sources
+    from sheets_module import _incoming_from_sources, _merge_tracker
 
-    incoming = _incoming_from_sources(canvas_data, syllabus_data)
+    incoming, stats = _incoming_from_sources(canvas_data, syllabus_data)
+    print_dedup_stats(stats)
 
     if existing_df is None:
         existing_df = load_from_google_sheet()
 
-    merged = _merge_records(existing_df, incoming)
+    merged = _merge_tracker(existing_df, incoming)
     return push_to_google_sheet(merged)

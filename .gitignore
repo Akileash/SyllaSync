@@ -10,6 +10,9 @@ token.json
 token.pickle
 client_secret*.json
 
+# Local dedupe / Task_ID persistence
+.syllasync_task_state.json
+
 # --- Generated / local data ---
 assignments.xlsx
 Sylla_Sync_Dashboard.xlsx
