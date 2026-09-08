@@ -1,0 +1,28 @@
+{
+  "term": "Fall YYYY",
+  "institution": "Your University",
+  "timezone": "America/Edmonton",
+  "notes": "Copy to schedule.json and fill in your lecture/lab/seminar sections.",
+  "sections": [
+    {
+      "course": "MATH 201",
+      "type": "LEC",
+      "section": "EB1",
+      "class_number": "00000",
+      "days": ["Mon", "Wed", "Fri"],
+      "start": "12:00",
+      "end": "13:00",
+      "location": "Building Room"
+    },
+    {
+      "course": "MATH 201",
+      "type": "LAB",
+      "section": "EL10",
+      "class_number": "00000",
+      "days": ["Mon"],
+      "start": "16:00",
+      "end": "17:00",
+      "location": "Building Room"
+    }
+  ]
+}

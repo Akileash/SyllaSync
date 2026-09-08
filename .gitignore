@@ -13,6 +13,10 @@ client_secret*.json
 # Local dedupe / Task_ID persistence
 .syllasync_task_state.json
 
+# Personal timetable (lectures/labs/seminars)
+schedule.json
+schedule.png
+
 # --- Generated / local data ---
 assignments.xlsx
 Sylla_Sync_Dashboard.xlsx
