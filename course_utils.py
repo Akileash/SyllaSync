@@ -3,14 +3,51 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 
-# Maps Canvas titles to canonical tracker class names.
-COURSE_CODE_PATTERNS: list[tuple[re.Pattern[str], str]] = [
-    (re.compile(r"\bMAT\s*E\s*(\d{3})\b", re.IGNORECASE), "MAT E {0}"),
-    (re.compile(r"\b(ENGG)\s*(\d{3})\b", re.IGNORECASE), "{0} {1}"),
-    (re.compile(r"\b(ECE)\s*(\d{3})\b", re.IGNORECASE), "{0} {1}"),
-    (re.compile(r"\b(MATH)\s*(\d{3})\b", re.IGNORECASE), "{0} {1}"),
+# Subject abbreviations that should collapse to a canonical department code.
+# Edge case: Canvas/syllabus may say "MTH 201" while the catalog is "MATH 201".
+SUBJECT_ALIASES: dict[str, str] = {
+    "MTH": "MATH",
+    "MATHS": "MATH",
+    "MATHEMATICS": "MATH",
+    "MATHE": "MAT E",
+    "MATE": "MAT E",
+    "ENG": "ENGG",
+    "ENGR": "ENGG",
+    "ENGINEERING": "ENGG",
+}
+
+# Prefer specific faculty patterns, then a generic alphanumeric course code.
+# Number group allows an optional trailing letter (201W) which we strip later.
+COURSE_CODE_PATTERNS: list[tuple[re.Pattern[str], Callable[[re.Match[str]], str]]] = [
+    (
+        re.compile(r"\bMAT\s*E\s*(\d{3,4})[A-Z]?\b", re.IGNORECASE),
+        lambda m: f"MAT E {m.group(1)}",
+    ),
+    (
+        re.compile(r"\b(ENGG|ENG|ENGR)\s*(\d{3,4})[A-Z]?\b", re.IGNORECASE),
+        lambda m: f"ENGG {m.group(2)}",
+    ),
+    (
+        re.compile(r"\b(ECE)\s*(\d{3,4})[A-Z]?\b", re.IGNORECASE),
+        lambda m: f"ECE {m.group(2)}",
+    ),
+    (
+        re.compile(r"\b(MATH|MTH|MATHS)\s*(\d{3,4})[A-Z]?\b", re.IGNORECASE),
+        lambda m: f"MATH {m.group(2)}",
+    ),
+    # Generic: CS 101, CHEM 105, STAT 151, ENG 101A, etc.
+    (
+        re.compile(r"\b([A-Z]{2,5})\s*(\d{3,4})[A-Z]?\b", re.IGNORECASE),
+        lambda m: _format_generic(m.group(1), m.group(2)),
+    ),
 ]
+
+
+def _format_generic(subject: str, number: str) -> str:
+    subj = SUBJECT_ALIASES.get(subject.upper(), subject.upper())
+    return f"{subj} {number}"
 
 
 def parse_allowed_courses(value: str | None) -> list[str]:
@@ -21,16 +58,52 @@ def parse_allowed_courses(value: str | None) -> list[str]:
 
 
 def normalize_course_code(course_name: str) -> str | None:
-    """Extract a canonical course code like 'ECE 210' from a Canvas title."""
-    text = re.sub(r"\s+", " ", course_name.strip())
-    for pattern, template in COURSE_CODE_PATTERNS:
+    """
+    Extract a canonical course code like 'MATH 201' from a Canvas/syllabus title.
+
+    Collapses common variants:
+      - MTH 201 / MATH 201W / Math 201 → MATH 201
+      - MAT E 201 / MATE201 → MAT E 201
+    """
+    if not course_name or not str(course_name).strip():
+        return None
+
+    text = re.sub(r"\s+", " ", str(course_name).strip())
+    for pattern, formatter in COURSE_CODE_PATTERNS:
         match = pattern.search(text)
-        if not match:
-            continue
-        if "{0}" in template and "{1}" not in template:
-            return template.format(match.group(1)).upper().replace("MAT E", "MAT E")
-        return template.format(match.group(1), match.group(2)).upper()
+        if match:
+            return formatter(match).upper()
     return None
+
+
+def courses_equivalent(a: str | None, b: str | None) -> bool:
+    """True when two course labels refer to the same catalog course."""
+    na = normalize_course_code(a or "")
+    nb = normalize_course_code(b or "")
+    if na and nb:
+        return na == nb
+    return str(a or "").strip().upper() == str(b or "").strip().upper()
+
+
+def prefer_course_label(current: str, candidate: str) -> str:
+    """
+    Prefer the canonical catalog-style label (MATH 201 over MTH 201 / MATH 201W).
+    """
+    cur = str(current or "").strip()
+    cand = str(candidate or "").strip()
+    canon_cur = normalize_course_code(cur)
+    canon_cand = normalize_course_code(cand)
+
+    if canon_cand and (not canon_cur or canon_cand == canon_cur):
+        # Prefer exact canonical spelling when either side is messy
+        if cand.upper() == canon_cand:
+            return canon_cand
+        if cur.upper() == canon_cur:
+            return canon_cur or cur
+        return canon_cand or cand or cur
+    if canon_cur:
+        return canon_cur if cur.upper() != canon_cur else cur
+    return cur or cand
 
 
 def course_matches_allowed(course_name: str, allowed_courses: list[str]) -> bool:
@@ -39,13 +112,17 @@ def course_matches_allowed(course_name: str, allowed_courses: list[str]) -> bool
         return True
 
     normalized = normalize_course_code(course_name)
-    allowed_normalized = {normalize_course_code(c) or c.upper() for c in allowed_courses}
+    allowed_normalized = {
+        normalize_course_code(c) or c.upper() for c in allowed_courses
+    }
 
     if normalized and normalized in allowed_normalized:
         return True
 
     name_upper = course_name.upper()
     for allowed in allowed_courses:
+        if courses_equivalent(course_name, allowed):
+            return True
         if allowed.upper() in name_upper:
             return True
     return False
