@@ -11,6 +11,7 @@ from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.datavalidation import DataValidation
 
+from course_utils import prefer_course_label
 from config import EXCEL_FILE_PATH
 from dedupe_module import (
     TASK_ID_COL,
@@ -23,7 +24,7 @@ from dedupe_module import (
 logger = logging.getLogger(__name__)
 
 SHEET_NAME = "Assessment Schedule"
-AUTO_COLUMNS = ["Course", "Assessment title", "Due Date", TASK_ID_COL]
+AUTO_COLUMNS = ["Course", "Assessment title", "Due Date", TASK_ID_COL, "Is Draft"]
 MANUAL_COLUMNS = [
     "Estimated time dedicated to task",
     "Status",
@@ -38,6 +39,7 @@ COLUMNS = [
     "Status",
     "Priority",
     TASK_ID_COL,
+    "Is Draft",
 ]
 
 TITLE = "Assessment Schedule"
@@ -67,6 +69,7 @@ COLUMN_WIDTHS = {
     "E": 14.0,
     "F": 12.0,
     "G": 28.0,  # Task_ID (tracking)
+    "H": 10.0,  # Is Draft
 }
 
 COLUMN_ALIGNMENTS = {
@@ -77,6 +80,7 @@ COLUMN_ALIGNMENTS = {
     "Status": Alignment(horizontal="center", vertical="center"),
     "Priority": Alignment(horizontal="center", vertical="center"),
     TASK_ID_COL: Alignment(horizontal="left", vertical="center"),
+    "Is Draft": Alignment(horizontal="center", vertical="center"),
 }
 
 STATUS_OPTIONS = '"Not started,In Progress,Done"'
@@ -132,6 +136,11 @@ def _collapse_by_match_key(df: pd.DataFrame) -> pd.DataFrame:
 
         if key not in best:
             best[key] = {col: row.get(col, "") for col in df.columns}
+            # Canonicalize course label on first insert
+            if "Course" in best[key]:
+                best[key]["Course"] = prefer_course_label(
+                    "", str(best[key].get("Course", ""))
+                )
             continue
 
         existing = best[key]
@@ -139,6 +148,11 @@ def _collapse_by_match_key(df: pd.DataFrame) -> pd.DataFrame:
             str(existing.get("Assessment title", "")),
             str(row.get("Assessment title", "")),
         )
+        if "Course" in df.columns:
+            existing["Course"] = prefer_course_label(
+                str(existing.get("Course", "")),
+                str(row.get("Course", "")),
+            )
         if TASK_ID_COL in df.columns:
             existing[TASK_ID_COL] = _prefer_task_id(
                 existing.get(TASK_ID_COL, ""), row.get(TASK_ID_COL, "")
@@ -169,8 +183,8 @@ def _incoming_from_sources(
     """
     records, stats = dedupe_cross_source(canvas_data, syllabus_data)
     frame = records_to_tracker_frame(records)
-    # Align to AUTO_COLUMNS (+ Source kept for debugging, dropped later if needed)
-    return frame.reindex(columns=AUTO_COLUMNS + ["Source"]).fillna(""), stats
+    cols = AUTO_COLUMNS + ["Source"]
+    return frame.reindex(columns=cols).fillna(""), stats
 
 
 def _load_existing_tracker(path: Path) -> pd.DataFrame:
@@ -282,6 +296,7 @@ def _merge_tracker(existing: pd.DataFrame, incoming: pd.DataFrame) -> pd.DataFra
                 "Assessment title": title,
                 "Due Date": row["Due Date"],
                 TASK_ID_COL: task_id,
+                "Is Draft": row.get("Is Draft", False),
                 **manual,
             }
         )
@@ -476,3 +491,10 @@ def update_sheet(
         raise
 
     return df
+
+
+# --- Public API (stable imports for other modules) ---
+normalize_key = _normalize_key
+sort_by_days_until_due = _sort_by_days_until_due
+incoming_from_sources = _incoming_from_sources
+merge_tracker = _merge_tracker
