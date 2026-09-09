@@ -1,12 +1,13 @@
 """
-Push Sylla Sync assignments to Google Calendar as all-day events.
+Push Sylla Sync assignments to Google Calendar.
 
-Idempotent upserts:
-  - Prefer matching by extendedProperties.private.task_id
-  - Fall back to fuzzy course+title matching (Assignment #1 Long vs Short)
-  - Delete leftover Sylla Sync duplicate events for the same fuzzy key
-  - Only manage events whose description contains "Sylla Sync"
-    (never touches lecture/lab schedule events)
+Idempotent upserts with full lifecycle:
+  - Match by extendedProperties.private.task_id (sylla_sync_task_id alias)
+  - Fall back to fuzzy course+title matching
+  - Delete obsolete Sylla Sync events whose task_id is no longer active
+  - Timed events when due time is explicit; otherwise all-day
+  - Status/Priority drive colorId and summary prefixes via vocab.py
+  - Skip Is Draft / phantom TBD rows
 """
 
 from __future__ import annotations
@@ -22,8 +23,10 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
 from config import BASE_DIR, GOOGLE_CALENDAR_ID
-from date_utils import normalize_calendar_date
+from date_utils import calendar_event_bounds
 from dedupe_module import TASK_ID_COL, ensure_task_id, fuzzy_match_key
+from retry_utils import with_retries
+from vocab import calendar_color, calendar_summary_prefix, normalize_status
 
 logger = logging.getLogger(__name__)
 
@@ -33,14 +36,8 @@ SCOPES = [
     "https://www.googleapis.com/auth/calendar",
 ]
 
-PRIORITY_COLOR = {
-    "high": "11",
-    "medium": "5",
-    "med": "5",
-    "low": "9",
-}
-
-SUMMARY_RE = re.compile(r"^(?P<course>.+?)\s+-\s+(?P<title>.+)$")
+SUMMARY_RE = re.compile(r"^(?:\[(?:DONE|SUBMITTED|CANCELLED|WIP)\]\s*)?(?P<body>.+)$")
+COURSE_TITLE_RE = re.compile(r"^(?P<course>.+?)\s+-\s+(?P<title>.+)$")
 
 
 class GoogleCalendarPermissionError(PermissionError):
@@ -63,7 +60,7 @@ def _authenticate():
         raise ValueError(
             "GOOGLE_CALENDAR_ID looks like an iCal/share URL. "
             "Use your email (e.g. you@gmail.com) or the Calendar ID from "
-            "Settings → Integrate calendar."
+            "Settings -> Integrate calendar."
         )
 
     creds = service_account.Credentials.from_service_account_file(
@@ -72,50 +69,63 @@ def _authenticate():
     return build("calendar", "v3", credentials=creds, cache_discovery=False)
 
 
-def _priority_color(priority: str) -> str | None:
-    return PRIORITY_COLOR.get(priority.strip().lower())
-
-
 def _parse_summary(summary: str) -> tuple[str, str]:
-    """Split 'COURSE - Title' into (course, title)."""
+    """Split optional-prefix 'COURSE - Title' into (course, title)."""
     text = (summary or "").strip()
-    match = SUMMARY_RE.match(text)
+    body_match = SUMMARY_RE.match(text)
+    body = body_match.group("body").strip() if body_match else text
+    match = COURSE_TITLE_RE.match(body)
     if match:
         return match.group("course").strip(), match.group("title").strip()
-    return "", text
+    return "", body
 
 
 def _is_syllasync_event(item: dict[str, Any]) -> bool:
-    """Only touch events Sylla Sync created (description marker)."""
+    """Only touch events Sylla Sync created (description / private markers)."""
     description = item.get("description") or ""
     private = ((item.get("extendedProperties") or {}).get("private")) or {}
-    return "Sylla Sync" in description or private.get("syllasync") == "1"
+    return (
+        "Sylla Sync" in description
+        or private.get("syllasync") == "1"
+        or bool(private.get("sylla_sync_task_id") or private.get("task_id"))
+    )
 
 
-def _event_start_date(item: dict[str, Any]) -> str:
+def _event_start_key(item: dict[str, Any]) -> str:
     start = item.get("start") or {}
-    if start.get("date"):
-        return start["date"]
     if start.get("dateTime"):
-        return str(start["dateTime"])[:10]
+        return str(start["dateTime"])
+    if start.get("date"):
+        return str(start["date"])
     return ""
+
+
+def _is_draft_row(record: dict[str, Any]) -> bool:
+    raw = record.get("Is Draft", False)
+    if isinstance(raw, bool):
+        return raw
+    return str(raw).strip().lower() in {"1", "true", "yes", "draft", "tbd"}
 
 
 def _build_event(record: dict[str, Any]) -> dict[str, Any] | None:
     """Convert a Sylla Sync assignment row into a Calendar event body."""
+    if _is_draft_row(record):
+        return None
+    if normalize_status(record.get("Status")).value == "CANCELLED":
+        return None
+
     title_col = "Assessment title" if "Assessment title" in record else "Task"
     title = str(record.get(title_col, "") or "").strip()
     course = str(record.get("Course", "") or "").strip()
     due_raw = record.get("Due Date", "")
 
-    iso_date = normalize_calendar_date(due_raw)
-    if not iso_date or not title:
+    bounds = calendar_event_bounds(due_raw)
+    if not bounds or not title:
         return None
 
-    summary = f"{course} - {title}" if course else title
-    end_date = (
-        datetime.strptime(iso_date, "%Y-%m-%d") + timedelta(days=1)
-    ).strftime("%Y-%m-%d")
+    prefix = calendar_summary_prefix(record.get("Status"))
+    base_summary = f"{course} - {title}" if course else title
+    summary = f"{prefix}{base_summary}"
 
     priority = str(record.get("Priority", "") or "").strip() or "—"
     status = str(record.get("Status", "") or "").strip() or "—"
@@ -141,8 +151,8 @@ def _build_event(record: dict[str, Any]) -> dict[str, Any] | None:
             f"Status: {status}\n"
             f"Estimated Time: {est_time}"
         ),
-        "start": {"date": iso_date},
-        "end": {"date": end_date},
+        "start": bounds["start"],
+        "end": bounds["end"],
         "reminders": {
             "useDefault": False,
             "overrides": [{"method": "popup", "minutes": 24 * 60}],
@@ -150,17 +160,22 @@ def _build_event(record: dict[str, Any]) -> dict[str, Any] | None:
         "extendedProperties": {
             "private": {
                 "task_id": task_id,
+                "sylla_sync_task_id": task_id,
                 "syllasync": "1",
                 "fuzzy_key": fuzzy_match_key(course, title),
+                "status": status,
+                "priority": priority,
             }
         },
     }
 
-    color = _priority_color(priority)
-    if color:
-        event["colorId"] = color
-
+    event["colorId"] = calendar_color(status, priority)
     return event
+
+
+@with_retries(label="calendar.list_events")
+def _list_events_page(service, calendar_id: str, **kwargs) -> dict[str, Any]:
+    return service.events().list(calendarId=calendar_id, **kwargs).execute()
 
 
 def _get_existing_syllasync_events(service, calendar_id: str) -> list[dict[str, Any]]:
@@ -172,18 +187,15 @@ def _get_existing_syllasync_events(service, calendar_id: str) -> list[dict[str, 
     time_max = (now + timedelta(days=730)).isoformat().replace("+00:00", "Z")
 
     while True:
-        result = (
-            service.events()
-            .list(
-                calendarId=calendar_id,
-                timeMin=time_min,
-                timeMax=time_max,
-                maxResults=500,
-                singleEvents=True,
-                orderBy="startTime",
-                pageToken=page_token,
-            )
-            .execute()
+        result = _list_events_page(
+            service,
+            calendar_id,
+            timeMin=time_min,
+            timeMax=time_max,
+            maxResults=500,
+            singleEvents=True,
+            orderBy="startTime",
+            pageToken=page_token,
         )
 
         for item in result.get("items", []):
@@ -192,14 +204,22 @@ def _get_existing_syllasync_events(service, calendar_id: str) -> list[dict[str, 
             summary = (item.get("summary") or "").strip()
             course, title = _parse_summary(summary)
             private = ((item.get("extendedProperties") or {}).get("private")) or {}
+            task_id = str(
+                private.get("sylla_sync_task_id")
+                or private.get("task_id")
+                or ""
+            ).strip()
             events.append(
                 {
                     "id": item["id"],
                     "summary": summary,
-                    "start_date": _event_start_date(item),
-                    "task_id": str(private.get("task_id") or "").strip(),
+                    "start_key": _event_start_key(item),
+                    "task_id": task_id,
                     "fuzzy_key": str(private.get("fuzzy_key") or "").strip()
                     or fuzzy_match_key(course, title),
+                    "status": str(private.get("status") or ""),
+                    "priority": str(private.get("priority") or ""),
+                    "colorId": str(item.get("colorId") or ""),
                     "raw": item,
                 }
             )
@@ -223,26 +243,77 @@ def _prefer_keeper(candidates: list[dict[str, Any]]) -> dict[str, Any]:
     )[0]
 
 
+@with_retries(label="calendar.delete")
 def _delete_event(service, calendar_id: str, event_id: str) -> None:
     service.events().delete(calendarId=calendar_id, eventId=event_id).execute()
 
 
-def _events_equivalent(existing_meta: dict[str, Any], event: dict[str, Any]) -> bool:
+@with_retries(label="calendar.insert")
+def _insert_event(service, calendar_id: str, body: dict[str, Any]) -> dict[str, Any]:
+    return service.events().insert(calendarId=calendar_id, body=body).execute()
+
+
+@with_retries(label="calendar.update")
+def _update_event(
+    service, calendar_id: str, event_id: str, body: dict[str, Any]
+) -> dict[str, Any]:
     return (
-        existing_meta.get("summary") == event.get("summary")
-        and existing_meta.get("start_date") == (event.get("start") or {}).get("date")
-        and existing_meta.get("task_id")
-        == event["extendedProperties"]["private"]["task_id"]
+        service.events()
+        .update(calendarId=calendar_id, eventId=event_id, body=body)
+        .execute()
     )
 
 
-def push_to_google_calendar(df: pd.DataFrame) -> dict[str, int]:
-    """
-    Create / update / skip Google Calendar events and remove Sylla Sync duplicates.
+def _events_equivalent(existing_meta: dict[str, Any], event: dict[str, Any]) -> bool:
+    private = event["extendedProperties"]["private"]
+    start = event.get("start") or {}
+    start_key = start.get("dateTime") or start.get("date") or ""
+    return (
+        existing_meta.get("summary") == event.get("summary")
+        and existing_meta.get("start_key") == start_key
+        and existing_meta.get("task_id") == private["task_id"]
+        and existing_meta.get("colorId") == str(event.get("colorId") or "")
+        and existing_meta.get("status") == private.get("status", "")
+        and existing_meta.get("priority") == private.get("priority", "")
+    )
 
-    Returns counts including deleted duplicate events.
+
+def compute_obsolete_event_ids(
+    existing: list[dict[str, Any]],
+    active_task_ids: set[str],
+    keep_event_ids: set[str],
+) -> list[str]:
+    """
+    Events tagged with Sylla Sync whose task_id is no longer active
+    (and not otherwise kept as the upsert target).
+    """
+    obsolete: list[str] = []
+    for meta in existing:
+        eid = meta["id"]
+        if eid in keep_event_ids:
+            continue
+        tid = meta.get("task_id") or ""
+        if tid and tid not in active_task_ids:
+            obsolete.append(eid)
+        elif not tid and meta.get("fuzzy_key"):
+            # Untagged leftovers not matched this run → remove
+            obsolete.append(eid)
+    return obsolete
+
+
+def push_to_google_calendar(
+    df: pd.DataFrame,
+    *,
+    dry_run: bool = False,
+) -> dict[str, int]:
+    """
+    Create / update / skip Google Calendar events and delete obsolete ones.
+
+    Returns counts including deleted obsolete / duplicate events.
     """
     print(f"\n--- Google Calendar sync -> {GOOGLE_CALENDAR_ID} ---")
+    if dry_run:
+        print("      [dry-run] No Calendar mutations will be applied.")
 
     try:
         service = _authenticate()
@@ -281,11 +352,13 @@ def push_to_google_calendar(df: pd.DataFrame) -> dict[str, int]:
         "failed": 0,
         "deleted": 0,
         "added": 0,
+        "obsolete_deleted": 0,
     }
 
     seen_task_ids: set[str] = set()
     seen_fuzzy: set[str] = set()
     keep_event_ids: set[str] = set()
+    active_task_ids: set[str] = set()
 
     for record in df.to_dict(orient="records"):
         event = _build_event(record)
@@ -295,6 +368,8 @@ def push_to_google_calendar(df: pd.DataFrame) -> dict[str, int]:
 
         task_id = event["extendedProperties"]["private"]["task_id"]
         fuzzy = event["extendedProperties"]["private"]["fuzzy_key"]
+        active_task_ids.add(task_id)
+
         if task_id in seen_task_ids or fuzzy in seen_fuzzy:
             counts["skipped"] += 1
             continue
@@ -302,7 +377,8 @@ def push_to_google_calendar(df: pd.DataFrame) -> dict[str, int]:
         seen_fuzzy.add(fuzzy)
 
         summary = event["summary"]
-        start_date = event["start"]["date"]
+        start = event.get("start") or {}
+        start_label = start.get("dateTime") or start.get("date") or "?"
 
         candidates = list(by_fuzzy.get(fuzzy, []))
         if task_id in by_task_id and by_task_id[task_id] not in candidates:
@@ -312,54 +388,62 @@ def push_to_google_calendar(df: pd.DataFrame) -> dict[str, int]:
 
         try:
             if match:
-                # Delete other fuzzy duplicates for this assignment
                 for extra in candidates:
                     if extra["id"] == match["id"]:
                         continue
-                    _delete_event(service, calendar_id, extra["id"])
+                    if dry_run:
+                        print(f"  x [dry-run] delete duplicate {extra['summary']}")
+                    else:
+                        _delete_event(service, calendar_id, extra["id"])
+                        print(f"  x deleted duplicate {extra['summary']}")
                     counts["deleted"] += 1
-                    print(f"  x deleted duplicate {extra['summary']}")
 
                 if _events_equivalent(match, event):
                     counts["unchanged"] += 1
-                    print(f"  = unchanged {summary} ({start_date})")
+                    print(f"  = unchanged {summary} ({start_label})")
                 else:
-                    service.events().update(
-                        calendarId=calendar_id,
-                        eventId=match["id"],
-                        body=event,
-                    ).execute()
+                    if dry_run:
+                        print(f"  ~ [dry-run] update {summary} ({start_label})")
+                    else:
+                        _update_event(service, calendar_id, match["id"], event)
+                        print(f"  ~ updated  {summary} ({start_label})")
                     counts["updated"] += 1
-                    print(f"  ~ updated  {summary} ({start_date})")
 
                 keep_event_ids.add(match["id"])
                 by_task_id[task_id] = {
                     "id": match["id"],
                     "summary": summary,
-                    "start_date": start_date,
+                    "start_key": start_label,
                     "task_id": task_id,
                     "fuzzy_key": fuzzy,
+                    "status": event["extendedProperties"]["private"].get("status", ""),
+                    "priority": event["extendedProperties"]["private"].get("priority", ""),
+                    "colorId": str(event.get("colorId") or ""),
                 }
                 by_fuzzy[fuzzy] = [by_task_id[task_id]]
             else:
-                created = (
-                    service.events()
-                    .insert(calendarId=calendar_id, body=event)
-                    .execute()
-                )
-                keep_event_ids.add(created["id"])
+                if dry_run:
+                    print(f"  + [dry-run] create {summary} ({start_label})")
+                    fake_id = f"dryrun-{task_id}"
+                    keep_event_ids.add(fake_id)
+                else:
+                    created = _insert_event(service, calendar_id, event)
+                    keep_event_ids.add(created["id"])
+                    fake_id = created["id"]
                 meta = {
-                    "id": created["id"],
+                    "id": fake_id,
                     "summary": summary,
-                    "start_date": start_date,
+                    "start_key": start_label,
                     "task_id": task_id,
                     "fuzzy_key": fuzzy,
+                    "status": event["extendedProperties"]["private"].get("status", ""),
+                    "priority": event["extendedProperties"]["private"].get("priority", ""),
+                    "colorId": str(event.get("colorId") or ""),
                 }
                 by_task_id[task_id] = meta
                 by_fuzzy[fuzzy] = [meta]
                 counts["created"] += 1
                 counts["added"] += 1
-                print(f"  + created  {summary} ({start_date})")
         except HttpError as exc:
             status = getattr(exc.resp, "status", None)
             if status in (403, 404):
@@ -372,7 +456,26 @@ def push_to_google_calendar(df: pd.DataFrame) -> dict[str, int]:
             print(f"  ! failed   {summary}: {exc}")
             logger.error("Failed to sync event '%s': %s", summary, exc)
 
-    # Final sweep: any leftover fuzzy groups with >1 Sylla Sync event
+    # Delete superseded / removed tasks (lifecycle)
+    obsolete_ids = compute_obsolete_event_ids(
+        existing_list, active_task_ids, keep_event_ids
+    )
+    for eid in obsolete_ids:
+        try:
+            summary = next(
+                (m["summary"] for m in existing_list if m["id"] == eid), eid
+            )
+            if dry_run:
+                print(f"  x [dry-run] delete obsolete {summary}")
+            else:
+                _delete_event(service, calendar_id, eid)
+                print(f"  x deleted obsolete {summary}")
+            counts["obsolete_deleted"] += 1
+            counts["deleted"] += 1
+        except HttpError as exc:
+            logger.warning("Could not delete obsolete event %s: %s", eid, exc)
+
+    # Final sweep: leftover fuzzy groups with >1 Sylla Sync event
     for fuzzy, group in list(by_fuzzy.items()):
         if fuzzy in seen_fuzzy:
             continue
@@ -380,19 +483,23 @@ def push_to_google_calendar(df: pd.DataFrame) -> dict[str, int]:
             continue
         keeper = _prefer_keeper(group)
         for extra in group:
-            if extra["id"] == keeper["id"]:
+            if extra["id"] == keeper["id"] or extra["id"] in keep_event_ids:
                 continue
             try:
-                _delete_event(service, calendar_id, extra["id"])
+                if dry_run:
+                    print(f"  x [dry-run] delete orphan duplicate {extra['summary']}")
+                else:
+                    _delete_event(service, calendar_id, extra["id"])
+                    print(f"  x deleted orphan duplicate {extra['summary']}")
                 counts["deleted"] += 1
-                print(f"  x deleted orphan duplicate {extra['summary']}")
             except HttpError as exc:
                 logger.warning("Could not delete duplicate %s: %s", extra["id"], exc)
 
     print(
         f"\n[INFO] Calendar: {counts['created']} created, "
         f"{counts['updated']} updated, {counts['unchanged']} unchanged, "
-        f"{counts['deleted']} duplicates deleted"
+        f"{counts['deleted']} deleted "
+        f"({counts['obsolete_deleted']} obsolete)"
     )
     if counts["skipped"] or counts["failed"]:
         print(
@@ -401,12 +508,15 @@ def push_to_google_calendar(df: pd.DataFrame) -> dict[str, int]:
         )
     print()
     logger.info(
-        "Calendar sync: created=%d updated=%d unchanged=%d deleted=%d skipped=%d failed=%d",
+        "Calendar sync: created=%d updated=%d unchanged=%d deleted=%d "
+        "obsolete=%d skipped=%d failed=%d dry_run=%s",
         counts["created"],
         counts["updated"],
         counts["unchanged"],
         counts["deleted"],
+        counts["obsolete_deleted"],
         counts["skipped"],
         counts["failed"],
+        dry_run,
     )
     return counts
