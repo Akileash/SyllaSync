@@ -6,8 +6,9 @@ Requires:
   - credentials.json service-account key in the project root
   - Sheet shared with the service account email (Editor access)
 
-Integration targets the **Masterlist** tab only. Columns I onward (formulas,
-charts, calendars) are never modified.
+Integration targets the **Masterlist** tab. Columns I onward (formulas,
+charts, calendars) are never modified. Column A stores Sylla Sync Task_ID.
+A companion SyllaSync_Meta sheet mirrors Task_ID for cross-machine hydration.
 """
 
 from __future__ import annotations
@@ -25,13 +26,16 @@ from date_utils import format_internal_datetime, format_sheet_date, format_sheet
 from dedupe_module import (
     TASK_ID_COL,
     ensure_task_id,
+    hydrate_state_from_rows,
     load_task_state,
     print_dedup_stats,
     remember_task_ids,
     resolve_persisted_task_id,
     syllabus_task_id,
 )
-from sheets_module import _normalize_key
+from retry_utils import with_retries
+from sheets_module import incoming_from_sources, merge_tracker, normalize_key, sort_by_days_until_due
+from vocab import sheet_status
 
 logger = logging.getLogger(__name__)
 
@@ -44,37 +48,28 @@ DISPLAY_COLUMNS = [
     "Status",
     "Priority",
 ]
-COLUMNS = DISPLAY_COLUMNS + [TASK_ID_COL]
+COLUMNS = DISPLAY_COLUMNS + [TASK_ID_COL, "Is Draft"]
 
 # HHS Assignment Tracker — Masterlist layout
 MASTERLIST_SHEET = "Masterlist"
+META_SHEET = "SyllaSync_Meta"
 DATA_START_ROW = 11
 
 # 1-based column indices on Masterlist (A=1)
-COL_STATUS = 2       # B
-COL_DUE_DATE = 3     # C  (visible "DUE DATE" header)
-COL_DUE_DATE_CALC = 4  # D  (date value used by =DAYS(D{n}, ...) formulas)
-COL_DUE_TIME = 5     # E
-COL_CLASS = 6        # F
-COL_TYPE = 7         # G
-COL_ASSIGNMENT = 8   # H
+COL_TASK_ID = 1  # A — Sylla Sync Task_ID (dedicated persistence column)
+COL_STATUS = 2  # B
+COL_DUE_DATE = 3  # C
+COL_DUE_DATE_CALC = 4  # D
+COL_DUE_TIME = 5  # E
+COL_CLASS = 6  # F
+COL_TYPE = 7  # G
+COL_ASSIGNMENT = 8  # H
 
 CREDENTIALS_PATH = BASE_DIR / "credentials.json"
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive",
 ]
-
-# Template status values (from Programming tab defaults)
-TEMPLATE_STATUS_OPTIONS = {
-    "not started": "Not Started",
-    "in progress": "In Progress",
-    "completed": "Complete",
-    "complete": "Complete",
-    "done": "Complete",
-    "submitted": "Submitted",
-    "n/a": "N/A",
-}
 
 # Infer assignment TYPE (column G) from the title
 TYPE_KEYWORDS: list[tuple[str, str]] = [
@@ -94,6 +89,7 @@ class GoogleSheetPermissionError(PermissionError):
     """Raised when the service account cannot access the target spreadsheet."""
 
 
+@with_retries(label="sheets.authenticate")
 def _authenticate() -> gspread.Client:
     """Authenticate with the service-account credentials file."""
     if not CREDENTIALS_PATH.exists():
@@ -108,37 +104,52 @@ def _authenticate() -> gspread.Client:
     return gspread.service_account(filename=str(CREDENTIALS_PATH), scopes=SCOPES)
 
 
-def _open_masterlist(client: gspread.Client) -> gspread.Worksheet:
-    """Open the Masterlist worksheet."""
+def _open_spreadsheet(client: gspread.Client) -> gspread.Spreadsheet:
     try:
-        spreadsheet = client.open_by_key(GOOGLE_SHEET_ID)
-        return spreadsheet.worksheet(MASTERLIST_SHEET)
+        return client.open_by_key(GOOGLE_SHEET_ID)
     except SpreadsheetNotFound as exc:
         raise GoogleSheetPermissionError(
             "Spreadsheet not found. Verify GOOGLE_SHEET_ID and ensure the sheet "
             "is shared with your service account email as Editor."
         ) from exc
-    except gspread.WorksheetNotFound as exc:
-        raise GoogleSheetPermissionError(
-            f"Worksheet '{MASTERLIST_SHEET}' not found. "
-            "Ensure you are using the HHS Assignment Tracker template."
-        ) from exc
     except APIError as exc:
         if exc.response.status_code in (403, 404):
             raise GoogleSheetPermissionError(
                 "Permission denied opening Google Sheet. Share the spreadsheet with "
-                "your service account email (from credentials.json → client_email) "
+                "your service account email (from credentials.json client_email) "
                 "and grant Editor access."
             ) from exc
         raise
 
 
+def _open_masterlist(client: gspread.Client) -> gspread.Worksheet:
+    """Open the Masterlist worksheet."""
+    spreadsheet = _open_spreadsheet(client)
+    try:
+        return spreadsheet.worksheet(MASTERLIST_SHEET)
+    except gspread.WorksheetNotFound as exc:
+        raise GoogleSheetPermissionError(
+            f"Worksheet '{MASTERLIST_SHEET}' not found. "
+            "Ensure you are using the HHS Assignment Tracker template."
+        ) from exc
+
+
+def _ensure_meta_sheet(spreadsheet: gspread.Spreadsheet) -> gspread.Worksheet:
+    """Create or open the Task_ID meta sheet (does not touch Masterlist formulas)."""
+    try:
+        return spreadsheet.worksheet(META_SHEET)
+    except gspread.WorksheetNotFound:
+        ws = spreadsheet.add_worksheet(title=META_SHEET, rows=2000, cols=4)
+        ws.update(
+            values=[["Task_ID", "Course", "Assessment title", "Due Date"]],
+            range_name="A1:D1",
+        )
+        return ws
+
+
 def _map_status_to_template(status: Any) -> str:
     """Map Sylla Sync status values to the template's STATUS dropdown."""
-    if not status or str(status).strip() == "":
-        return "Not Started"
-    normalized = str(status).strip().lower()
-    return TEMPLATE_STATUS_OPTIONS.get(normalized, str(status).strip())
+    return sheet_status(status)
 
 
 def _infer_assignment_type(title: str) -> str:
@@ -162,7 +173,6 @@ def _split_due_datetime(due_value: Any) -> tuple[str, str]:
 
 def _row_to_internal(row_values: list[Any], row_number: int) -> dict[str, Any] | None:
     """Convert a Masterlist row into Sylla Sync's internal column format."""
-    # Pad to at least column H (index 7)
     cells = list(row_values) + [""] * max(0, 8 - len(row_values))
 
     course = str(cells[COL_CLASS - 1]).strip()
@@ -179,7 +189,6 @@ def _row_to_internal(row_values: list[Any], row_number: int) -> dict[str, Any] |
     if str(calc_date).strip():
         due_date = calc_date
 
-    # Combine date + time for internal storage
     combined_due = due_date
     if due_date and due_time:
         combined = pd.to_datetime(f"{due_date} {due_time}", errors="coerce")
@@ -198,37 +207,67 @@ def _row_to_internal(row_values: list[Any], row_number: int) -> dict[str, Any] |
         "Estimated time dedicated to task": "",
         "Status": _map_status_to_template(cells[COL_STATUS - 1]),
         "Priority": "",
-        TASK_ID_COL: "",
+        TASK_ID_COL: str(cells[COL_TASK_ID - 1]).strip() if cells else "",
+        "Is Draft": False,
     }
 
 
 def _internal_to_masterlist_row(record: dict[str, Any]) -> list[Any]:
-    """Convert an internal record to Masterlist columns B–H."""
+    """Convert an internal record to Masterlist columns A–H (Task_ID + B–H)."""
     due_date, due_time = _split_due_datetime(record.get("Due Date", ""))
+    task_id = str(record.get(TASK_ID_COL) or ensure_task_id(record)).strip()
 
     return [
-        _map_status_to_template(record.get("Status", "")),   # B
-        due_date,                                              # C (visible due date)
-        due_date,                                              # D (feeds DAYS UNTIL DUE formula)
-        due_time,                                              # E
-        record.get("Course", ""),                              # F
+        task_id,  # A
+        _map_status_to_template(record.get("Status", "")),  # B
+        due_date,  # C
+        due_date,  # D
+        due_time,  # E
+        record.get("Course", ""),  # F
         _infer_assignment_type(str(record.get("Assessment title", ""))),  # G
-        record.get("Assessment title", ""),                    # H
+        record.get("Assessment title", ""),  # H
     ]
+
+
+@with_retries(label="sheets.get_all_values")
+def _get_all_values(worksheet: gspread.Worksheet) -> list[list[Any]]:
+    return worksheet.get_all_values()
+
+
+def _load_meta_task_map(spreadsheet: gspread.Spreadsheet) -> dict[str, str]:
+    """Map fuzzy (course||title) -> Task_ID from Meta sheet."""
+    try:
+        meta = spreadsheet.worksheet(META_SHEET)
+    except gspread.WorksheetNotFound:
+        return {}
+    values = _get_all_values(meta)
+    mapping: dict[str, str] = {}
+    for row in values[1:]:
+        if len(row) < 3:
+            continue
+        task_id, course, title = str(row[0]).strip(), str(row[1]).strip(), str(row[2]).strip()
+        if task_id and (course or title):
+            key = f"{normalize_key(course, title)[0]}||{normalize_key(course, title)[1]}"
+            # Prefer canvas_ over syllabus_ on collision
+            existing = mapping.get(key, "")
+            if existing.startswith("canvas_") and not task_id.startswith("canvas_"):
+                continue
+            mapping[key] = task_id
+    return mapping
 
 
 def load_from_google_sheet() -> pd.DataFrame:
     """
     Read existing Masterlist rows into Sylla Sync's internal DataFrame format.
 
-    Restores Task_ID from the local persistence map when possible so Calendar
-    upserts stay stable across runs (Masterlist itself has no Task_ID column).
-
-    Returns:
-        DataFrame with COLUMNS schema (no _row metadata).
+    Hydrates Task_ID from column A, Meta sheet, then local state — rebuilding
+    local JSON when wiped so identity survives across machines.
     """
-    worksheet = _open_masterlist(_authenticate())
-    all_values = worksheet.get_all_values()
+    client = _authenticate()
+    spreadsheet = _open_spreadsheet(client)
+    worksheet = spreadsheet.worksheet(MASTERLIST_SHEET)
+    all_values = _get_all_values(worksheet)
+    meta_map = _load_meta_task_map(spreadsheet)
     state = load_task_state()
 
     records: list[dict[str, Any]] = []
@@ -236,13 +275,22 @@ def load_from_google_sheet() -> pd.DataFrame:
         parsed = _row_to_internal(all_values[row_idx], row_idx + 1)
         if not parsed:
             continue
+
+        sheet_tid = str(parsed.get(TASK_ID_COL) or "").strip()
+        key = normalize_key(parsed["Course"], parsed["Assessment title"])
+        meta_tid = meta_map.get(f"{key[0]}||{key[1]}", "")
         fallback = syllabus_task_id(
             parsed["Course"], parsed["Assessment title"], parsed["Due Date"]
         )
+        preferred = sheet_tid or meta_tid or fallback
         parsed[TASK_ID_COL] = resolve_persisted_task_id(
-            parsed["Course"], parsed["Assessment title"], fallback, state
+            parsed["Course"], parsed["Assessment title"], preferred, state
         )
         records.append(parsed)
+
+    # Rebuild local cache from sheet so wiped machines recover identity
+    if records:
+        hydrate_state_from_rows(records, state)
 
     if not records:
         return pd.DataFrame(columns=COLUMNS)
@@ -255,12 +303,12 @@ def _load_masterlist_with_rows(
     worksheet: gspread.Worksheet,
 ) -> tuple[dict[tuple[str, str], list[int]], int]:
     """
-    Load existing Masterlist entries keyed by fuzzy (course, title) → row numbers.
+    Load existing Masterlist entries keyed by fuzzy (course, title) -> row numbers.
 
     Returns:
         (existing_keys_to_rows, next_empty_row)
     """
-    all_values = worksheet.get_all_values()
+    all_values = _get_all_values(worksheet)
     existing: dict[tuple[str, str], list[int]] = {}
     next_empty_row = DATA_START_ROW
 
@@ -268,7 +316,7 @@ def _load_masterlist_with_rows(
         row_number = row_idx + 1
         parsed = _row_to_internal(all_values[row_idx], row_number)
         if parsed:
-            key = _normalize_key(parsed["Course"], parsed["Assessment title"])
+            key = normalize_key(parsed["Course"], parsed["Assessment title"])
             existing.setdefault(key, []).append(row_number)
             next_empty_row = max(next_empty_row, row_number + 1)
         elif row_idx + 1 >= DATA_START_ROW:
@@ -284,27 +332,59 @@ def _load_masterlist_with_rows(
     return existing, next_empty_row
 
 
-def _clear_masterlist_row(worksheet: gspread.Worksheet, row_number: int) -> None:
-    """Blank Masterlist data columns B–H for a row (leaves formula columns intact)."""
-    worksheet.update(
-        values=[[""] * 7],
-        range_name=f"B{row_number}:H{row_number}",
-        value_input_option="USER_ENTERED",
-    )
-
-
-def _merge_records(
+def preview_sheets_diff(
     existing_df: pd.DataFrame,
-    incoming_df: pd.DataFrame,
-) -> pd.DataFrame:
-    """
-    Merge incoming Canvas/syllabus data with existing tracker rows.
+    merged_df: pd.DataFrame,
+) -> dict[str, Any]:
+    """Compute a dry-run summary of Masterlist changes."""
+    old_ids = set(
+        str(x).strip()
+        for x in existing_df.get(TASK_ID_COL, pd.Series(dtype=str)).tolist()
+        if str(x).strip()
+    )
+    new_ids = set(
+        str(x).strip()
+        for x in merged_df.get(TASK_ID_COL, pd.Series(dtype=str)).tolist()
+        if str(x).strip()
+    )
+    return {
+        "rows_existing": len(existing_df),
+        "rows_merged": len(merged_df),
+        "task_ids_added": sorted(new_ids - old_ids),
+        "task_ids_removed": sorted(old_ids - new_ids),
+        "task_ids_kept": sorted(old_ids & new_ids),
+    }
 
-    Preserves manual Status (and other manual columns) for matching assignments.
-    """
-    from sheets_module import _merge_tracker
 
-    return _merge_tracker(existing_df, incoming_df)
+@with_retries(label="sheets.batch_update")
+def _batch_update(worksheet: gspread.Worksheet, updates: list[dict[str, Any]]) -> None:
+    worksheet.batch_update(updates, value_input_option="USER_ENTERED")
+
+
+def _write_meta_sheet(
+    spreadsheet: gspread.Spreadsheet,
+    merged_df: pd.DataFrame,
+    *,
+    dry_run: bool = False,
+) -> None:
+    """Persist Task_ID map to Meta sheet for cross-machine hydration."""
+    if dry_run:
+        logger.info("[dry-run] Would rewrite %s with %d Task_ID row(s).", META_SHEET, len(merged_df))
+        return
+    meta = _ensure_meta_sheet(spreadsheet)
+    rows = [["Task_ID", "Course", "Assessment title", "Due Date"]]
+    for record in merged_df.to_dict(orient="records"):
+        rows.append(
+            [
+                str(record.get(TASK_ID_COL) or ""),
+                str(record.get("Course") or ""),
+                str(record.get("Assessment title") or ""),
+                str(record.get("Due Date") or ""),
+            ]
+        )
+    # Clear + rewrite (Meta has no user formulas)
+    meta.clear()
+    meta.update(values=rows, range_name="A1", value_input_option="USER_ENTERED")
 
 
 def _write_masterlist_rows(
@@ -312,27 +392,24 @@ def _write_masterlist_rows(
     merged_df: pd.DataFrame,
     existing_rows: dict[tuple[str, str], list[int]],
     next_empty_row: int,
+    *,
+    dry_run: bool = False,
 ) -> int:
     """
-    Write merged data to Masterlist columns B–H, ordered by days until due
-    (soonest at the top). Formula columns (I+) are left untouched.
-
-    Returns:
-        Number of rows written.
+    Write merged data to Masterlist columns A–H, ordered by days until due.
+    Formula columns (I+) are left untouched.
     """
-    from sheets_module import _sort_by_days_until_due
-
     if merged_df.empty:
         logger.warning("No assignment data to write to Masterlist.")
         return 0
 
-    sorted_df = _sort_by_days_until_due(merged_df)
+    sorted_df = sort_by_days_until_due(merged_df)
 
     updates: list[dict[str, Any]] = []
     written = 0
 
-    for offset, record in enumerate(sorted_df.to_dict(orient="records")):
-        key = _normalize_key(record["Course"], record["Assessment title"])
+    for record in sorted_df.to_dict(orient="records"):
+        key = normalize_key(record["Course"], record["Assessment title"])
         if not key[0] and not key[1]:
             continue
 
@@ -340,46 +417,43 @@ def _write_masterlist_rows(
         row_values = _internal_to_masterlist_row(record)
         updates.append(
             {
-                "range": f"B{target_row}:H{target_row}",
+                "range": f"A{target_row}:H{target_row}",
                 "values": [row_values],
             }
         )
         written += 1
 
-    # Clear leftover data rows below the newly written block (old unsorted / dup rows)
     clear_until = max(next_empty_row - 1, DATA_START_ROW + written - 1)
     for row_number in range(DATA_START_ROW + written, clear_until + 1):
         updates.append(
             {
-                "range": f"B{row_number}:H{row_number}",
-                "values": [[""] * 7],
+                "range": f"A{row_number}:H{row_number}",
+                "values": [[""] * 8],
             }
         )
 
-    # Also clear any previously occupied rows that sit above clear_until but
-    # were tracked as existing beyond the contiguous rewrite window.
-    occupied = {
-        row for rows in existing_rows.values() for row in rows
-    }
+    occupied = {row for rows in existing_rows.values() for row in rows}
     for row_number in occupied:
         if row_number >= DATA_START_ROW + written:
             updates.append(
                 {
-                    "range": f"B{row_number}:H{row_number}",
-                    "values": [[""] * 7],
+                    "range": f"A{row_number}:H{row_number}",
+                    "values": [[""] * 8],
                 }
             )
 
-    # Deduplicate clear/write ranges — last write wins; prefer keeping data writes
-    # by putting clears first then data updates... actually data is already first.
-    # Collapse duplicate ranges keeping the last entry.
     by_range: dict[str, dict[str, Any]] = {}
     for item in updates:
         by_range[item["range"]] = item
     updates = list(by_range.values())
 
+    if dry_run:
+        logger.info("[dry-run] Would write %d Masterlist row(s) (A-H).", written)
+        print(f"      [dry-run] Would write {written} Masterlist row(s).")
+        return written
+
     if updates:
-        worksheet.batch_update(updates, value_input_option="USER_ENTERED")
+        _batch_update(worksheet, updates)
 
     if written:
         _apply_date_column_format(
@@ -425,20 +499,19 @@ def _apply_date_column_format(
     worksheet.spreadsheet.batch_update({"requests": requests})
 
 
-def push_to_google_sheet(df: pd.DataFrame) -> pd.DataFrame:
+def push_to_google_sheet(
+    df: pd.DataFrame,
+    *,
+    dry_run: bool = False,
+) -> pd.DataFrame:
     """
     Merge and push a DataFrame to the Masterlist worksheet.
 
-    Only columns B–H are written. Formula columns (I+) are preserved.
-    Task_ID is kept on the returned DataFrame (and local state) for Calendar.
-
-    Returns:
-        The merged DataFrame in Sylla Sync's internal format.
+    Writes columns A–H (Task_ID in A). Formula columns (I+) are preserved.
     """
     prepared = df.copy()
     prepared.columns = prepared.columns.str.strip()
     prepared = prepared.reindex(columns=COLUMNS).fillna("")
-    # Ensure every row has a Task_ID before writing state / returning
     prepared[TASK_ID_COL] = prepared.apply(
         lambda row: ensure_task_id(row.to_dict()), axis=1
     )
@@ -446,17 +519,24 @@ def push_to_google_sheet(df: pd.DataFrame) -> pd.DataFrame:
 
     try:
         client = _authenticate()
-        worksheet = _open_masterlist(client)
+        spreadsheet = _open_spreadsheet(client)
+        worksheet = spreadsheet.worksheet(MASTERLIST_SHEET)
 
         existing_rows, next_empty_row = _load_masterlist_with_rows(worksheet)
         written = _write_masterlist_rows(
-            worksheet, prepared, existing_rows, next_empty_row
+            worksheet,
+            prepared,
+            existing_rows,
+            next_empty_row,
+            dry_run=dry_run,
         )
+        _write_meta_sheet(spreadsheet, prepared, dry_run=dry_run)
 
         logger.info(
-            "Synced %d row(s) to '%s' → '%s' (columns B–H only).",
+            "%s %d row(s) to '%s' / '%s' (columns A-H).",
+            "Would sync" if dry_run else "Synced",
             written,
-            worksheet.spreadsheet.title,
+            spreadsheet.title,
             MASTERLIST_SHEET,
         )
         return prepared
@@ -480,6 +560,8 @@ def push_from_records(
     canvas_data: list[dict[str, Any]],
     syllabus_data: list[dict[str, Any]],
     existing_df: pd.DataFrame | None = None,
+    *,
+    dry_run: bool = False,
 ) -> pd.DataFrame:
     """
     Build a DataFrame from sync records, merge with existing Masterlist data, and push.
@@ -487,13 +569,25 @@ def push_from_records(
     Uses the dedupe engine (Canvas wins over syllabus) and preserves manual
     Status/Priority via Task_ID / fuzzy key matching.
     """
-    from sheets_module import _incoming_from_sources, _merge_tracker
-
-    incoming, stats = _incoming_from_sources(canvas_data, syllabus_data)
+    incoming, stats = incoming_from_sources(canvas_data, syllabus_data)
     print_dedup_stats(stats)
 
     if existing_df is None:
         existing_df = load_from_google_sheet()
 
-    merged = _merge_tracker(existing_df, incoming)
-    return push_to_google_sheet(merged)
+    merged = merge_tracker(existing_df, incoming)
+
+    if dry_run:
+        diff = preview_sheets_diff(existing_df, merged)
+        print(
+            f"      [dry-run] Sheets diff: "
+            f"+{len(diff['task_ids_added'])} "
+            f"-{len(diff['task_ids_removed'])} "
+            f"={len(diff['task_ids_kept'])} kept"
+        )
+        for tid in diff["task_ids_added"][:10]:
+            print(f"        + {tid}")
+        for tid in diff["task_ids_removed"][:10]:
+            print(f"        - {tid}")
+
+    return push_to_google_sheet(merged, dry_run=dry_run)
