@@ -67,8 +67,11 @@ Leave `ALLOWED_COURSES` blank only if you want every active Canvas course.
 
 **Sheets**
 
-1. Make a copy of the [HHS Assignment Tracker](https://docs.google.com/spreadsheets/d/1ALoho_3oHCHn7qsL3HuwOTkCWu2Rz3ZojE3SVflN65c/copy)
-2. Share it with `client_email` as **Editor**
+Google Sheet template credit: **HHS Student Life @ Purdue** —  
+[template folder on Google Drive](https://drive.google.com/drive/folders/16OVKLNUKoe5slXzq4g3rC4kSgVLTWgYK)
+
+1. From that folder (or make a copy of the [HHS Assignment Tracker](https://docs.google.com/spreadsheets/d/1ALoho_3oHCHn7qsL3HuwOTkCWu2Rz3ZojE3SVflN65c/copy)), open the tracker and **File → Make a copy**
+2. Share your copy with `client_email` as **Editor**
 3. Put the Sheet ID in `.env` as `GOOGLE_SHEET_ID=...`
 4. Test: `python test_sheets.py`
 
@@ -257,3 +260,10 @@ Set up Sylla Sync using this README, in this order:
 5. If that looks good, run python main.py --all
 6. Confirm .env, credentials.json, and schedule.json are never committed
 ```
+
+---
+
+## Credits
+
+Google Sheets assignment tracker template by **HHS Student Life @ Purdue**:  
+https://drive.google.com/drive/folders/16OVKLNUKoe5slXzq4g3rC4kSgVLTWgYK
