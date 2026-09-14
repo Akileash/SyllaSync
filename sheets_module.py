@@ -1,6 +1,7 @@
 """Combine assignment data and write to a local Excel assessment tracker."""
 
 import logging
+import re
 from pathlib import Path
 from typing import Any
 
@@ -11,12 +12,14 @@ from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.datavalidation import DataValidation
 
-from course_utils import prefer_course_label
 from config import EXCEL_FILE_PATH
+from course_utils import prefer_course_label
+from date_utils import split_title_and_due
 from dedupe_module import (
     TASK_ID_COL,
     dedupe_cross_source,
     fuzzy_match_key,
+    is_droppable_placeholder,
     remember_task_ids,
     records_to_tracker_frame,
 )
@@ -99,12 +102,19 @@ def _normalize_key(course: Any, title: Any) -> tuple[str, str]:
 
 
 def _prefer_title(current: str, candidate: str) -> str:
-    """Keep the more descriptive title when collapsing duplicates."""
+    """Keep the cleaner, more descriptive title when collapsing duplicates."""
     cur = str(current or "").strip()
     cand = str(candidate or "").strip()
     if not cur:
         return cand
     if not cand:
+        return cur
+    # Prefer titles that do not still embed "due date …"
+    cur_has_due = bool(re.search(r"\bdue\b", cur, re.IGNORECASE))
+    cand_has_due = bool(re.search(r"\bdue\b", cand, re.IGNORECASE))
+    if cur_has_due and not cand_has_due:
+        return cand
+    if cand_has_due and not cur_has_due:
         return cur
     if len(cand) > len(cur):
         return cand
@@ -228,13 +238,19 @@ def _sort_by_days_until_due(df: pd.DataFrame) -> pd.DataFrame:
     return out.drop(columns=["_sort_date", "_sort_day"]).reset_index(drop=True)
 
 
+def _is_droppable_placeholder(title: Any, due: Any = "") -> bool:
+    """Bare syllabus headings that must never remain on the tracker."""
+    return is_droppable_placeholder(title, due)
+
+
 def _merge_tracker(existing: pd.DataFrame, incoming: pd.DataFrame) -> pd.DataFrame:
     """
     Merge synced data with the existing tracker.
 
     - Matching rows (Task_ID or fuzzy title key): update auto columns, keep manual columns.
     - New rows: add with blank manual columns.
-    - Rows only in existing: keep (preserves completed/historical entries).
+    - Rows only in existing: keep (preserves completed/historical entries),
+      except bare category phantoms like "Labs" / "Assignments".
     - Near-duplicate titles within the same course are collapsed.
     """
     existing = existing.reindex(columns=COLUMNS).fillna("")
@@ -244,6 +260,26 @@ def _merge_tracker(existing: pd.DataFrame, incoming: pd.DataFrame) -> pd.DataFra
     for col in AUTO_COLUMNS:
         if col not in incoming.columns:
             incoming[col] = ""
+
+    # Clean embedded dues + drop category placeholders before matching
+    def _sanitize_frame(df: pd.DataFrame) -> pd.DataFrame:
+        if df.empty:
+            return df
+        rows: list[dict[str, Any]] = []
+        for _, row in df.iterrows():
+            title = str(row.get("Assessment title", "") or "")
+            due = row.get("Due Date", "")
+            title, due = split_title_and_due(title, due)
+            if _is_droppable_placeholder(title, due):
+                continue
+            rec = {col: row.get(col, "") for col in df.columns}
+            rec["Assessment title"] = title
+            rec["Due Date"] = due
+            rows.append(rec)
+        return pd.DataFrame(rows, columns=list(df.columns)) if rows else pd.DataFrame(columns=df.columns)
+
+    existing = _sanitize_frame(existing)
+    incoming = _sanitize_frame(incoming)
 
     existing = _collapse_by_match_key(existing)
     incoming = _collapse_by_match_key(incoming)
@@ -290,11 +326,15 @@ def _merge_tracker(existing: pd.DataFrame, incoming: pd.DataFrame) -> pd.DataFra
             existing_title_by_key.get(key, ""),
             str(row.get("Assessment title", "")),
         )
+        due = row.get("Due Date", "")
+        title, due = split_title_and_due(title, due)
+        if _is_droppable_placeholder(title, due):
+            continue
         merged_rows.append(
             {
                 "Course": row["Course"],
                 "Assessment title": title,
-                "Due Date": row["Due Date"],
+                "Due Date": due,
                 TASK_ID_COL: task_id,
                 "Is Draft": row.get("Is Draft", False),
                 **manual,
@@ -308,12 +348,24 @@ def _merge_tracker(existing: pd.DataFrame, incoming: pd.DataFrame) -> pd.DataFra
         task_id = str(row.get(TASK_ID_COL, "") or "").strip()
         if key in incoming_keys or (task_id and task_id in incoming_task_ids):
             continue
-        merged_rows.append({col: row.get(col, "") for col in COLUMNS})
+        title = str(row.get("Assessment title", "") or "")
+        due = row.get("Due Date", "")
+        title, due = split_title_and_due(title, due)
+        # Drop stale phantoms that were written before we filtered them
+        if _is_droppable_placeholder(title, due):
+            continue
+        kept = {col: row.get(col, "") for col in COLUMNS}
+        kept["Assessment title"] = title
+        kept["Due Date"] = due
+        merged_rows.append(kept)
 
     if not merged_rows:
         return pd.DataFrame(columns=COLUMNS)
 
     df = pd.DataFrame(merged_rows, columns=COLUMNS)
+    df = _collapse_by_match_key(df)
+    # Final pass after title cleanup — catches Online Assignment 1 vs …
+    df = _sanitize_frame(df)
     df = _collapse_by_match_key(df)
     df = _sort_by_days_until_due(df)
     remember_task_ids(df)
