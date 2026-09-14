@@ -16,7 +16,7 @@ from config import (
     CANVAS_URL,
 )
 from course_utils import course_matches_allowed, normalize_course_code, parse_allowed_courses
-from date_utils import format_internal_datetime
+from date_utils import format_internal_datetime, split_title_and_due
 from retry_utils import with_retries
 from schedule_module import load_schedule
 
@@ -30,22 +30,19 @@ class CanvasFetchError(RuntimeError):
 
 
 def _format_due_date(due_at: str | None) -> str | None:
+    """
+    Convert Canvas due_at (usually UTC) into local YYYY-MM-DD [HH:MM].
+
+    Must convert timezone before storing — otherwise Calendar shows wrong-day
+    timed events (e.g. 05:59Z → 4:59–5:59am) alongside an older all-day event.
+    """
     if not due_at:
         return None
-    iso_input = due_at.replace("Z", "+00:00") if "Z" in str(due_at) else due_at
-    formatted = format_internal_datetime(iso_input)
+    formatted = format_internal_datetime(due_at)
     if formatted:
         return formatted
-    try:
-        dt = datetime.fromisoformat(iso_input)
-        return (
-            dt.strftime("%Y-%m-%d %H:%M")
-            if (dt.hour or dt.minute)
-            else dt.strftime("%Y-%m-%d")
-        )
-    except (ValueError, TypeError):
-        logger.warning("Could not parse due date: %s", due_at)
-        return due_at
+    logger.warning("Could not parse due date: %s", due_at)
+    return str(due_at)
 
 
 def _within_window(due_at: str | None, lookback_days: int) -> bool:
@@ -162,12 +159,16 @@ def fetch_canvas_assignments(
             due_at = getattr(assignment, "due_at", None)
             if not _within_window(due_at, lookback):
                 continue
+            raw_title = getattr(assignment, "name", "Untitled Assignment")
+            due_formatted = _format_due_date(due_at) or "No due date"
+            # Strip "Due date …" out of Canvas names so Sheets titles stay clean
+            clean_title, due_formatted = split_title_and_due(raw_title, due_formatted)
             assignments.append(
                 {
                     "Source": "Canvas",
                     "Course": course_name,
-                    "Task": getattr(assignment, "name", "Untitled Assignment"),
-                    "Due Date": _format_due_date(due_at) or "No due date",
+                    "Task": clean_title,
+                    "Due Date": due_formatted,
                     "Canvas ID": getattr(assignment, "id", None),
                     "assignment_id": getattr(assignment, "id", None),
                 }

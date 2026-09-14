@@ -23,8 +23,15 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
 from config import BASE_DIR, GOOGLE_CALENDAR_ID
-from date_utils import calendar_event_bounds
-from dedupe_module import TASK_ID_COL, ensure_task_id, fuzzy_match_key
+from course_utils import normalize_course_code
+from date_utils import calendar_event_bounds, split_title_and_due
+from dedupe_module import (
+    TASK_ID_COL,
+    ensure_task_id,
+    fuzzy_match_key,
+    fuzzy_title_key,
+    is_droppable_placeholder,
+)
 from retry_utils import with_retries
 from vocab import calendar_color, calendar_summary_prefix, normalize_status
 
@@ -118,6 +125,10 @@ def _build_event(record: dict[str, Any]) -> dict[str, Any] | None:
     title = str(record.get(title_col, "") or "").strip()
     course = str(record.get("Course", "") or "").strip()
     due_raw = record.get("Due Date", "")
+    title, due_raw = split_title_and_due(title, due_raw)
+    # Never create events for bare "Labs" / "Assignments" placeholders
+    if is_droppable_placeholder(title, due_raw):
+        return None
 
     bounds = calendar_event_bounds(due_raw)
     if not bounds or not title:
@@ -243,6 +254,60 @@ def _prefer_keeper(candidates: list[dict[str, Any]]) -> dict[str, Any]:
     )[0]
 
 
+def _course_key_from_summary(summary: str) -> str:
+    course, _ = _parse_summary(summary)
+    return (normalize_course_code(course) or course or "").strip().lower()
+
+
+def _title_fingerprint(summary: str) -> str:
+    _, title = _parse_summary(summary)
+    return fuzzy_title_key(title)
+
+
+def _collect_match_candidates(
+    *,
+    task_id: str,
+    fuzzy: str,
+    summary: str,
+    by_task_id: dict[str, dict[str, Any]],
+    by_fuzzy: dict[str, list[dict[str, Any]]],
+    existing_list: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """
+    Gather calendar events that likely represent the same assignment.
+
+    Exact task_id / fuzzy_key first; then same course + same title fingerprint
+    (e.g. truncated "Assignm…" vs full "Assignment One - 2026 Co-op…").
+    """
+    candidates: list[dict[str, Any]] = list(by_fuzzy.get(fuzzy, []))
+    if task_id in by_task_id and by_task_id[task_id] not in candidates:
+        candidates.append(by_task_id[task_id])
+
+    course_key = _course_key_from_summary(summary)
+    title_fp = _title_fingerprint(summary)
+    if course_key and title_fp:
+        for meta in existing_list:
+            if meta in candidates:
+                continue
+            if _course_key_from_summary(meta.get("summary") or "") != course_key:
+                continue
+            if _title_fingerprint(meta.get("summary") or "") == title_fp:
+                candidates.append(meta)
+                continue
+            # Prefix / containment for truncated summaries
+            _, new_title = _parse_summary(summary)
+            _, old_title = _parse_summary(meta.get("summary") or "")
+            a, b = new_title.lower(), old_title.lower()
+            if a and b and (a.startswith(b[:12]) or b.startswith(a[:12])):
+                candidates.append(meta)
+
+    # Deduplicate by event id
+    by_id: dict[str, dict[str, Any]] = {}
+    for c in candidates:
+        by_id[c["id"]] = c
+    return list(by_id.values())
+
+
 @with_retries(label="calendar.delete")
 def _delete_event(service, calendar_id: str, event_id: str) -> None:
     service.events().delete(calendarId=calendar_id, eventId=event_id).execute()
@@ -286,11 +351,17 @@ def compute_obsolete_event_ids(
     """
     Events tagged with Sylla Sync whose task_id is no longer active
     (and not otherwise kept as the upsert target).
+
+    Also removes leftover category phantoms (e.g. "MATH 201 - Labs").
     """
     obsolete: list[str] = []
     for meta in existing:
         eid = meta["id"]
         if eid in keep_event_ids:
+            continue
+        _, title = _parse_summary(meta.get("summary") or "")
+        if is_droppable_placeholder(title):
+            obsolete.append(eid)
             continue
         tid = meta.get("task_id") or ""
         if tid and tid not in active_task_ids:
@@ -380,9 +451,14 @@ def push_to_google_calendar(
         start = event.get("start") or {}
         start_label = start.get("dateTime") or start.get("date") or "?"
 
-        candidates = list(by_fuzzy.get(fuzzy, []))
-        if task_id in by_task_id and by_task_id[task_id] not in candidates:
-            candidates.append(by_task_id[task_id])
+        candidates = _collect_match_candidates(
+            task_id=task_id,
+            fuzzy=fuzzy,
+            summary=summary,
+            by_task_id=by_task_id,
+            by_fuzzy=by_fuzzy,
+            existing_list=existing_list,
+        )
 
         match = _prefer_keeper(candidates) if candidates else None
 
@@ -474,6 +550,37 @@ def push_to_google_calendar(
             counts["deleted"] += 1
         except HttpError as exc:
             logger.warning("Could not delete obsolete event %s: %s", eid, exc)
+
+    # Near-duplicate sweep: same course + title fingerprint left outside keep set
+    kept_fingerprints: set[tuple[str, str]] = set()
+    for meta in existing_list:
+        if meta["id"] in keep_event_ids:
+            kept_fingerprints.add(
+                (
+                    _course_key_from_summary(meta.get("summary") or ""),
+                    _title_fingerprint(meta.get("summary") or ""),
+                )
+            )
+    for meta in existing_list:
+        eid = meta["id"]
+        if eid in keep_event_ids:
+            continue
+        fp = (
+            _course_key_from_summary(meta.get("summary") or ""),
+            _title_fingerprint(meta.get("summary") or ""),
+        )
+        if not fp[0] or not fp[1] or fp not in kept_fingerprints:
+            continue
+        try:
+            if dry_run:
+                print(f"  x [dry-run] delete near-duplicate {meta['summary']}")
+            else:
+                _delete_event(service, calendar_id, eid)
+                print(f"  x deleted near-duplicate {meta['summary']}")
+            counts["deleted"] += 1
+            keep_event_ids.add(eid)  # prevent double-delete below
+        except HttpError as exc:
+            logger.warning("Could not delete near-duplicate %s: %s", eid, exc)
 
     # Final sweep: leftover fuzzy groups with >1 Sylla Sync event
     for fuzzy, group in list(by_fuzzy.items()):

@@ -22,11 +22,17 @@ import pandas as pd
 from gspread.exceptions import APIError, SpreadsheetNotFound
 
 from config import BASE_DIR, GOOGLE_SHEET_ID
-from date_utils import format_internal_datetime, format_sheet_date, format_sheet_time
+from date_utils import (
+    format_internal_datetime,
+    format_sheet_date,
+    format_sheet_time,
+    split_title_and_due,
+)
 from dedupe_module import (
     TASK_ID_COL,
     ensure_task_id,
     hydrate_state_from_rows,
+    is_droppable_placeholder,
     load_task_state,
     print_dedup_stats,
     remember_task_ids,
@@ -199,6 +205,9 @@ def _row_to_internal(row_values: list[Any], row_number: int) -> dict[str, Any] |
     elif due_date:
         combined_due = format_internal_datetime(due_date) or str(due_date)
 
+    # Clean titles that still contain "Due date …" from older syncs
+    title, combined_due = split_title_and_due(title, combined_due)
+
     return {
         "_row": row_number,
         "Course": course,
@@ -212,20 +221,32 @@ def _row_to_internal(row_values: list[Any], row_number: int) -> dict[str, Any] |
     }
 
 
-def _internal_to_masterlist_row(record: dict[str, Any]) -> list[Any]:
-    """Convert an internal record to Masterlist columns A–H (Task_ID + B–H)."""
-    due_date, due_time = _split_due_datetime(record.get("Due Date", ""))
+def _internal_to_masterlist_row(record: dict[str, Any]) -> list[Any] | None:
+    """
+    Convert an internal record to Masterlist columns A–H (Task_ID + B–H).
+
+    Column C = visible DUE DATE, column D = same calendar date for the
+    template's DAYS UNTIL DUE formula (I+). They are intentionally identical.
+    Column E holds the time (e.g. 11:45 PM) when present.
+    """
+    title = str(record.get("Assessment title", "") or "")
+    due_raw = record.get("Due Date", "")
+    clean_title, due_raw = split_title_and_due(title, due_raw)
+    if is_droppable_placeholder(clean_title, due_raw):
+        # Signal caller to skip this row entirely
+        return None
+    due_date, due_time = _split_due_datetime(due_raw)
     task_id = str(record.get(TASK_ID_COL) or ensure_task_id(record)).strip()
 
     return [
         task_id,  # A
         _map_status_to_template(record.get("Status", "")),  # B
-        due_date,  # C
-        due_date,  # D
-        due_time,  # E
+        due_date,  # C — visible due date
+        due_date,  # D — same date; feeds DAYS UNTIL DUE formulas
+        due_time,  # E — due time only
         record.get("Course", ""),  # F
-        _infer_assignment_type(str(record.get("Assessment title", ""))),  # G
-        record.get("Assessment title", ""),  # H
+        _infer_assignment_type(clean_title),  # G
+        clean_title,  # H — never keep embedded "Due date …" in the title
     ]
 
 
@@ -415,6 +436,8 @@ def _write_masterlist_rows(
 
         target_row = DATA_START_ROW + written
         row_values = _internal_to_masterlist_row(record)
+        if row_values is None:
+            continue
         updates.append(
             {
                 "range": f"A{target_row}:H{target_row}",

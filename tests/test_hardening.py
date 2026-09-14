@@ -264,6 +264,69 @@ def test_discord_skips_completed_status():
     assert _is_finished_status("In Progress") is False
 
 
+def test_canvas_utc_due_converts_to_local(monkeypatch):
+    import date_utils
+
+    monkeypatch.setattr(date_utils, "LOCAL_TIMEZONE", "America/Edmonton")
+    # 2026-09-17 05:59 UTC == 2026-09-16 23:59 MDT
+    assert (
+        date_utils.format_internal_datetime("2026-09-17T05:59:00Z")
+        == "2026-09-16 23:59"
+    )
+
+
+def test_assignment_one_fuzzy_key():
+    from dedupe_module import fuzzy_match_key, fuzzy_title_key
+
+    assert fuzzy_title_key("Assignment One - 2026 Co-op Agreement") == "assignment#1"
+    assert fuzzy_title_key("Assignment 1") == "assignment#1"
+    assert fuzzy_match_key("ENGG 299", "Assignment One - 2026 Co-op") == fuzzy_match_key(
+        "ENGG 299", "Assignment 1"
+    )
+
+
+def test_split_title_and_due_moves_date_out_of_title(monkeypatch):
+    import date_utils
+
+    monkeypatch.setattr("config.TERM_YEAR", 2026)
+
+    title, due = date_utils.split_title_and_due(
+        "Online Assignment 2- Due date Oct 6, 11:45 PM", ""
+    )
+    assert title == "Online Assignment 2"
+    assert due.startswith("2026-10-06")
+    assert "23:45" in due
+
+    title2, due2 = date_utils.split_title_and_due(
+        "Online Assignment 1- Due date Monday Sept 22", ""
+    )
+    assert title2 == "Online Assignment 1"
+    assert due2.startswith("2026-09-22")
+
+    # Multiline Canvas-style title
+    title_nl, due_nl = date_utils.split_title_and_due(
+        "Online Assignment 4\nDue date Nov 3, 11:45 PM", ""
+    )
+    assert title_nl == "Online Assignment 4"
+    assert due_nl.startswith("2026-11-03")
+
+    # Canvas due wins over title fragment; title still cleaned
+    title3, due3 = date_utils.split_title_and_due(
+        "Online Assignment 3- Due date Oct 20, 11:45 PM",
+        "2026-10-20 23:45",
+    )
+    assert title3 == "Online Assignment 3"
+    assert due3 == "2026-10-20 23:45"
+
+    # "No due date" placeholder yields to title parse
+    title4, due4 = date_utils.split_title_and_due(
+        "Online Assignment 5- Due date Nov 17, 11:45 PM",
+        "No due date",
+    )
+    assert title4 == "Online Assignment 5"
+    assert due4.startswith("2026-11-17")
+
+
 def test_mth_vs_math_201w_normalize_same():
     from course_utils import courses_equivalent, normalize_course_code, prefer_course_label
     from dedupe_module import fuzzy_match_key
@@ -276,6 +339,53 @@ def test_mth_vs_math_201w_normalize_same():
     assert fuzzy_match_key("MTH 201", "Assignment 1") == fuzzy_match_key(
         "MATH 201W", "Assignment 1"
     )
+
+
+def test_merge_drops_stale_labs_placeholder():
+    from sheets_module import merge_tracker
+
+    existing = pd.DataFrame(
+        [
+            {
+                "Course": "MATH 201",
+                "Assessment title": "Labs",
+                "Due Date": "2026-09-08",
+                "Estimated time dedicated to task": "",
+                "Status": "Not Started",
+                "Priority": "",
+                TASK_ID_COL: "syllabus_labs",
+                "Is Draft": False,
+            },
+            {
+                "Course": "MATH 201",
+                "Assessment title": "Online Assignment 1- Due date Monday Sept 22",
+                "Due Date": "",
+                "Estimated time dedicated to task": "",
+                "Status": "Not Started",
+                "Priority": "",
+                TASK_ID_COL: "syllabus_oa1_dirty",
+                "Is Draft": False,
+            },
+        ]
+    )
+    incoming = pd.DataFrame(
+        [
+            {
+                "Course": "MATH 201",
+                "Assessment title": "Online Assignment 1",
+                "Due Date": "2026-09-22",
+                TASK_ID_COL: "canvas_1",
+                "Is Draft": False,
+                "Source": "Canvas",
+            }
+        ]
+    )
+    merged = merge_tracker(existing, incoming)
+    titles = [str(t).lower() for t in merged["Assessment title"].tolist()]
+    assert "labs" not in titles
+    assert len(merged) == 1
+    assert merged.iloc[0]["Assessment title"] == "Online Assignment 1"
+    assert str(merged.iloc[0]["Due Date"]).startswith("2026-09-22")
 
 
 def test_cross_source_dedupe_collapses_course_aliases(tmp_path, monkeypatch):

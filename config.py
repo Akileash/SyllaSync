@@ -25,7 +25,7 @@ GOOGLE_CALENDAR_ID = os.getenv("GOOGLE_CALENDAR_ID", "")
 SCHEDULE_PATH = BASE_DIR / "schedule.json"
 
 # Optional Gemini model override (google-genai SDK)
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
 
 # Past-due Canvas lookback window (days)
 CANVAS_PAST_DUE_DAYS = int(os.getenv("CANVAS_PAST_DUE_DAYS", "21"))

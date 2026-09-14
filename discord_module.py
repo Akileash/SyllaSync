@@ -10,7 +10,7 @@ import requests
 
 from config import DISCORD_WEBHOOK_URL, LOCAL_TIMEZONE
 from date_utils import due_window_bounds, has_explicit_time, local_tz, parse_due_datetime
-from dedupe_module import is_phantom_task
+from dedupe_module import is_droppable_placeholder, is_phantom_task
 from retry_utils import with_retries
 from vocab import Status, normalize_priority, normalize_status
 
@@ -78,7 +78,8 @@ def _filter_upcoming(df: pd.DataFrame) -> pd.DataFrame:
     title_col = "Assessment title" if "Assessment title" in df.columns else "Task"
     if title_col in df.columns:
         mask &= ~df.apply(
-            lambda row: is_phantom_task(row.get(title_col), row.get("Due Date")),
+            lambda row: is_droppable_placeholder(row.get(title_col), row.get("Due Date"))
+            or is_phantom_task(row.get(title_col), row.get("Due Date")),
             axis=1,
         )
 

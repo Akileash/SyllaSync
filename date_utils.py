@@ -174,7 +174,13 @@ def format_sheet_time(value: Any) -> str:
 
 
 def format_internal_datetime(value: Any) -> str:
-    """Normalize to YYYY-MM-DD or YYYY-MM-DD HH:MM for internal storage."""
+    """
+    Normalize to YYYY-MM-DD or YYYY-MM-DD HH:MM in LOCAL_TIMEZONE.
+
+    Edge case: Canvas returns UTC (`…Z`). Convert to local before stripping
+    tzinfo so 05:59Z on the 17th becomes 23:59 on the 16th in Edmonton —
+    otherwise Calendar creates a second timed event on the wrong day.
+    """
     if value is None or (isinstance(value, float) and pd.isna(value)):
         return ""
 
@@ -182,10 +188,123 @@ def format_internal_datetime(value: Any) -> str:
     if text.lower() in MISSING_DATE_VALUES or WEEKDAY_ONLY.match(text):
         return text if text.lower() in MISSING_DATE_VALUES else ""
 
-    parsed = pd.to_datetime(text, errors="coerce")
+    # Prefer timezone-aware path for Canvas ISO strings
+    try:
+        iso = text.replace("Z", "+00:00") if text.endswith("Z") else text
+        if "T" in iso or "+" in iso[-6:] or iso.count("-") >= 3:
+            dt = datetime.fromisoformat(iso)
+            if dt.tzinfo is None:
+                # Naive ISO without offset — treat as already local
+                pass
+            else:
+                dt = dt.astimezone(local_tz()).replace(tzinfo=None)
+            if dt.hour or dt.minute or dt.second:
+                return dt.strftime("%Y-%m-%d %H:%M")
+            return dt.strftime("%Y-%m-%d")
+    except (ValueError, TypeError):
+        pass
+
+    parsed = pd.to_datetime(text, errors="coerce", utc=False)
     if pd.isna(parsed):
         return text
+
+    # If pandas attached tz, convert to local
+    if getattr(parsed, "tzinfo", None) is not None or (
+        hasattr(parsed, "tz") and parsed.tz is not None
+    ):
+        try:
+            parsed = parsed.tz_convert(str(local_tz())).tz_localize(None)
+        except (TypeError, AttributeError, ValueError):
+            pass
 
     if parsed.hour or parsed.minute or parsed.second:
         return parsed.strftime("%Y-%m-%d %H:%M")
     return parsed.strftime("%Y-%m-%d")
+
+
+# Pull "Due date …" / "due …" clauses out of Canvas/syllabus titles
+# (may appear on the same line or after a newline).
+_EMBEDDED_DUE_RE = re.compile(
+    r"""
+    [\s\-–—:,]*                 # separators before the due clause
+    (?:due\s*date|due\s*by|due)\s*[:\-]?\s*
+    (?:
+        (?:mon|tue|wed|thu|fri|sat|sun)[a-z]*\s+  # optional weekday
+    )?
+    (
+        # Month Day[, Year][, time]
+        (?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)[a-z]*
+        \s+\d{1,2}
+        (?:st|nd|rd|th)?
+        (?:,?\s*\d{4})?
+        (?:
+            \s*,?\s*(?:at\s+)?\d{1,2}:\d{2}\s*(?:[AaPp][Mm])?
+        )?
+        |
+        # ISO date[, time]
+        \d{4}-\d{2}-\d{2}
+        (?:\s+\d{1,2}:\d{2}(?::\d{2})?)?
+        |
+        # Numeric M/D[/YYYY][, time]
+        \d{1,2}/\d{1,2}(?:/\d{2,4})?
+        (?:
+            \s*,?\s*(?:at\s+)?\d{1,2}:\d{2}\s*(?:[AaPp][Mm])?
+        )?
+    )
+    \s*$
+    """,
+    re.IGNORECASE | re.VERBOSE | re.MULTILINE,
+)
+
+
+def split_title_and_due(title: Any, existing_due: Any = "") -> tuple[str, str]:
+    """
+    Always separate assignment name from embedded due text.
+
+    Call this at every ingest/write boundary so titles never keep
+    "Due date Oct 6, 11:45 PM" in the ASSIGNMENT column.
+
+    Example:
+      "Online Assignment 2- Due date Oct 6, 11:45 PM"
+        → ("Online Assignment 2", "2026-10-06 23:45")
+    """
+    from config import TERM_YEAR  # local import avoids circular load at import time
+
+    raw = str(title or "").strip()
+    # Normalize newlines so "Title\\nDue date …" still matches
+    raw_flat = re.sub(r"[\r\n]+", " ", raw)
+    raw_flat = re.sub(r"\s+", " ", raw_flat).strip()
+
+    existing = ""
+    existing_raw = str(existing_due or "").strip()
+    if existing_raw and existing_raw.lower() not in MISSING_DATE_VALUES:
+        existing = format_internal_datetime(existing_raw) or existing_raw
+
+    if not raw_flat:
+        return "", existing
+
+    match = _EMBEDDED_DUE_RE.search(raw_flat)
+    if not match:
+        return re.sub(r"[\s\-–—]+$", "", raw_flat).strip() or raw_flat, existing
+
+    due_fragment = match.group(1).strip()
+    clean_title = raw_flat[: match.start()].strip(" -\u2013\u2014:,\t")
+    clean_title = re.sub(r"[\s\-–—]+$", "", clean_title).strip() or raw_flat
+
+    fragment = due_fragment
+    if not re.search(r"\d{4}", fragment) and not re.search(r"\d{1,2}/\d{1,2}/\d{2,4}", fragment):
+        fragment = re.sub(
+            r"^([A-Za-z]+)\s+(\d{1,2})(?:st|nd|rd|th)?\b",
+            rf"\1 \2, {TERM_YEAR}",
+            fragment,
+            count=1,
+        )
+
+    parsed_due = format_internal_datetime(fragment) or format_internal_datetime(due_fragment)
+
+    # Prefer a real API/structured due when present; still always return clean_title
+    if existing and normalize_calendar_date(existing):
+        return clean_title, existing
+    if parsed_due and normalize_calendar_date(parsed_due):
+        return clean_title, parsed_due
+    return clean_title, existing
