@@ -12,6 +12,7 @@ from PyPDF2 import PdfReader
 
 from config import GEMINI_API_KEY, GEMINI_MODEL, TERM_YEAR
 from course_utils import normalize_course_code
+from date_utils import split_title_and_due
 from retry_utils import with_retries
 
 logger = logging.getLogger(__name__)
@@ -88,11 +89,12 @@ def _month_day_to_iso(month: str, day: str, year: int | None = None) -> str:
 
 
 def _record(course: str, task: str, due_date: str) -> dict[str, Any]:
+    clean_task, clean_due = split_title_and_due(task, due_date)
     return {
         "Source": "Syllabus",
         "Course": course,
-        "Task": task,
-        "Due Date": due_date,
+        "Task": clean_task,
+        "Due Date": clean_due,
     }
 
 
@@ -244,14 +246,18 @@ def _parse_gemini_response(raw_text: str) -> list[dict[str, str]]:
     for item in data:
         if not isinstance(item, dict):
             continue
-        results.append(
-            {
-                "Source": "Syllabus",
-                "Course": str(item.get("Course", "Unknown")),
-                "Task": str(item.get("Task", "Unknown")),
-                "Due Date": str(item.get("Due Date", "TBD")),
-            }
-        )
+            clean_task, clean_due = split_title_and_due(
+                item.get("Task", "Unknown"),
+                item.get("Due Date", "TBD"),
+            )
+            results.append(
+                {
+                    "Source": "Syllabus",
+                    "Course": str(item.get("Course", "Unknown")),
+                    "Task": clean_task,
+                    "Due Date": clean_due or "TBD",
+                }
+            )
     return results
 
 

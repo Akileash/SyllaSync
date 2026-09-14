@@ -21,8 +21,8 @@ from typing import Any
 import pandas as pd
 
 from config import BASE_DIR
+from date_utils import normalize_calendar_date, split_title_and_due
 from course_utils import courses_equivalent, normalize_course_code, prefer_course_label
-from date_utils import normalize_calendar_date
 
 logger = logging.getLogger(__name__)
 
@@ -31,9 +31,22 @@ TASK_ID_COL = "Task_ID"
 
 NUMBERED_TASK_RE = re.compile(
     r"^(assignment|assign|assn|a|quiz|exam|lab|homework|hw|project|midterm|final|ps|problem\s*set)"
-    r"\s*#?\s*(\d+)\b",
+    r"\s*#?\s*(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\b",
     re.IGNORECASE,
 )
+
+_WORD_NUMBERS = {
+    "one": "1",
+    "two": "2",
+    "three": "3",
+    "four": "4",
+    "five": "5",
+    "six": "6",
+    "seven": "7",
+    "eight": "8",
+    "nine": "9",
+    "ten": "10",
+}
 
 # Generic category placeholders — never real single due items (even with a date)
 CATEGORY_PHANTOMS = {
@@ -48,6 +61,7 @@ CATEGORY_PHANTOMS = {
     "homework",
     "homeworks",
     "term work",
+    "online assignments",
 }
 
 # Exam labels that are only phantoms when undated / TBD
@@ -91,6 +105,21 @@ def normalize_title_text(title: Any) -> str:
 def fuzzy_title_key(title: Any) -> str:
     """Collapse near-duplicate titles into a stable fingerprint."""
     title_norm = normalize_title_text(title)
+    # "Online Assignment 2 …" → same key as "Assignment 2"
+    online = re.match(
+        r"^online\s+(assignment|assign|quiz|lab|homework|hw|project)\s*#?\s*"
+        r"(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\b",
+        title_norm,
+        re.IGNORECASE,
+    )
+    if online:
+        kind = {
+            "hw": "homework",
+            "assign": "assignment",
+        }.get(online.group(1).lower(), online.group(1).lower())
+        num = _WORD_NUMBERS.get(online.group(2).lower(), online.group(2).lower())
+        return f"{kind}#{num}"
+
     numbered = NUMBERED_TASK_RE.match(title_norm)
     if numbered:
         kind = numbered.group(1).lower()
@@ -104,7 +133,9 @@ def fuzzy_title_key(title: Any) -> str:
         }.get(kind, kind)
         if kind == "final":
             kind = "exam"
-        return f"{kind}#{numbered.group(2)}"
+        num = numbered.group(2).lower()
+        num = _WORD_NUMBERS.get(num, num)
+        return f"{kind}#{num}"
 
     if re.search(r"\bmidterms?\b", title_norm):
         num = re.search(r"\bmidterms?\s*#?\s*(\d+)\b", title_norm)
@@ -155,6 +186,8 @@ def is_phantom_task(title: Any, due_date: Any = None) -> bool:
     # Numbered / specific tasks are real (Lab 3, Midterm 2, Assignment 1)
     if NUMBERED_TASK_RE.match(title_norm):
         return False
+    if re.search(r"\bonline\s+assignments?\s*#?\s*\d+\b", title_norm):
+        return False
     if re.search(r"\bmidterms?\s*#?\s*\d+\b", title_norm):
         return False
     if title_norm in CATEGORY_PHANTOMS:
@@ -163,6 +196,23 @@ def is_phantom_task(title: Any, due_date: Any = None) -> bool:
     if title_norm in EXAM_PHANTOMS and not due_iso:
         return True
     return False
+
+
+def is_droppable_placeholder(title: Any, due_date: Any = "") -> bool:
+    """
+    Bare category headings that must never stay on Sheets/Calendar/Discord.
+
+    Unlike undated Midterm/Final drafts, these are always removed — including
+    stale rows already on Google Sheets from older syncs.
+    """
+    title_norm = normalize_title_text(title)
+    if not title_norm:
+        return True
+    if NUMBERED_TASK_RE.match(title_norm):
+        return False
+    if re.search(r"\bonline\s+assignments?\s*#?\s*\d+\b", title_norm):
+        return False
+    return title_norm in CATEGORY_PHANTOMS
 
 
 def dates_within(a: Any, b: Any, hours: int = 48) -> bool:
@@ -327,6 +377,7 @@ def dedupe_cross_source(
         course = item.get("Course", "")
         title = item.get("Task", "")
         due = item.get("Due Date", "")
+        title, due = split_title_and_due(title, due)
         canvas_id = item.get("Canvas ID") or item.get("assignment_id")
         preferred = (
             canvas_task_id(canvas_id)
@@ -365,6 +416,7 @@ def dedupe_cross_source(
         course = item.get("Course", "")
         title = item.get("Task", "")
         due = item.get("Due Date", "")
+        title, due = split_title_and_due(title, due)
         phantom = is_phantom_task(title, due)
         # Category phantoms (bare "Labs", "Assignments") are never kept —
         # they pollute Discord/Calendar even when a nearby PDF date was attached.
