@@ -234,6 +234,80 @@ def test_compute_obsolete_event_ids():
     assert "e2" not in obsolete
 
 
+def test_calendar_hw1_does_not_match_hw10():
+    """Regression: short titles must not collide via startswith (HW1 vs HW10)."""
+    from google_calendar_module import _collect_match_candidates
+
+    existing = [
+        {
+            "id": "hw10",
+            "summary": "MATH 201 - HW10",
+            "task_id": "syllabus_math_201_hw10_2026-12-03",
+            "fuzzy_key": "math 201||homework#10",
+            "start_key": "2026-12-03T16:00:00-07:00",
+        },
+        {
+            "id": "hw2",
+            "summary": "MATH 201 - HW2",
+            "task_id": "syllabus_math_201_hw2_2026-09-24",
+            "fuzzy_key": "math 201||homework#2",
+            "start_key": "2026-09-24T16:00:00-06:00",
+        },
+    ]
+    candidates = _collect_match_candidates(
+        task_id="canvas_99",
+        fuzzy="math 201||homework#1",
+        summary="[SUBMITTED] MATH 201 - HW1",
+        by_task_id={},
+        by_fuzzy={},
+        existing_list=existing,
+    )
+    assert candidates == []
+
+
+def test_calendar_long_truncated_titles_still_match():
+    from google_calendar_module import _collect_match_candidates
+
+    existing = [
+        {
+            "id": "long1",
+            "summary": "ENGG 299 - Assignment One - 2026 Co-op Expectations",
+            "task_id": "canvas_1",
+            "fuzzy_key": "engg 299||assignment#1",
+            "start_key": "2026-09-16",
+        }
+    ]
+    candidates = _collect_match_candidates(
+        task_id="canvas_1",
+        fuzzy="engg 299||assignment#1",
+        summary="ENGG 299 - Assignment One - 2026 Co-op Expectations Agreement",
+        by_task_id={},
+        by_fuzzy={},
+        existing_list=existing,
+    )
+    assert len(candidates) == 1
+    assert candidates[0]["id"] == "long1"
+
+
+def test_build_event_sets_confirmed_status():
+    from google_calendar_module import _build_event
+
+    event = _build_event(
+        {
+            "Course": "MATH 201",
+            "Assessment title": "HW1",
+            "Due Date": "2026-09-17 17:00",
+            "Status": "Submitted",
+            "Priority": "",
+            "Task_ID": "canvas_99",
+            "Is Draft": False,
+        }
+    )
+    assert event is not None
+    assert event["status"] == "confirmed"
+    assert event["summary"] == "[SUBMITTED] MATH 201 - HW1"
+
+
 # ---------------------------------------------------------------------------
 # Vocabulary
 # ---------------------------------------------------------------------------
