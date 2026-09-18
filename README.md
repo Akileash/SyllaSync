@@ -2,6 +2,7 @@
 
 Sync university assignments from **Canvas** + **syllabus / lab schedule PDFs** into Google Sheets, Google Calendar, Discord, and/or a local Excel dashboard.
 
+Vibe coded with Cursor
 ---
 
 ## AI agent prompt (copy everything below this line)
