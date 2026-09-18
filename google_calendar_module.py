@@ -155,6 +155,7 @@ def _build_event(record: dict[str, Any]) -> dict[str, Any] | None:
 
     event: dict[str, Any] = {
         "summary": summary,
+        "status": "confirmed",
         "description": (
             f"Source: Sylla Sync\n"
             f"Task ID: {task_id}\n"
@@ -210,6 +211,9 @@ def _get_existing_syllasync_events(service, calendar_id: str) -> list[dict[str, 
         )
 
         for item in result.get("items", []):
+            # Never reuse trashed events — updating them leaves items invisible
+            if item.get("status") == "cancelled":
+                continue
             if not _is_syllasync_event(item):
                 continue
             summary = (item.get("summary") or "").strip()
@@ -294,11 +298,18 @@ def _collect_match_candidates(
             if _title_fingerprint(meta.get("summary") or "") == title_fp:
                 candidates.append(meta)
                 continue
-            # Prefix / containment for truncated summaries
+            # Prefix match only for long truncated titles (e.g. "Assignm…").
+            # Short titles like HW1 must NOT match HW10 via startswith.
             _, new_title = _parse_summary(summary)
             _, old_title = _parse_summary(meta.get("summary") or "")
-            a, b = new_title.lower(), old_title.lower()
-            if a and b and (a.startswith(b[:12]) or b.startswith(a[:12])):
+            a, b = new_title.lower().strip(), old_title.lower().strip()
+            if (
+                a
+                and b
+                and len(a) >= 12
+                and len(b) >= 12
+                and (a.startswith(b) or b.startswith(a))
+            ):
                 candidates.append(meta)
 
     # Deduplicate by event id
@@ -463,6 +474,7 @@ def push_to_google_calendar(
         match = _prefer_keeper(candidates) if candidates else None
 
         try:
+            event_id: str | None = None
             if match:
                 for extra in candidates:
                     if extra["id"] == match["id"]:
@@ -470,56 +482,68 @@ def push_to_google_calendar(
                     if dry_run:
                         print(f"  x [dry-run] delete duplicate {extra['summary']}")
                     else:
-                        _delete_event(service, calendar_id, extra["id"])
-                        print(f"  x deleted duplicate {extra['summary']}")
+                        try:
+                            _delete_event(service, calendar_id, extra["id"])
+                            print(f"  x deleted duplicate {extra['summary']}")
+                        except HttpError as del_exc:
+                            if getattr(del_exc.resp, "status", None) == 410:
+                                print(f"  x already gone {extra['summary']}")
+                            else:
+                                raise
                     counts["deleted"] += 1
 
                 if _events_equivalent(match, event):
                     counts["unchanged"] += 1
                     print(f"  = unchanged {summary} ({start_label})")
+                    event_id = match["id"]
                 else:
                     if dry_run:
                         print(f"  ~ [dry-run] update {summary} ({start_label})")
+                        event_id = match["id"]
                     else:
-                        _update_event(service, calendar_id, match["id"], event)
-                        print(f"  ~ updated  {summary} ({start_label})")
-                    counts["updated"] += 1
-
-                keep_event_ids.add(match["id"])
-                by_task_id[task_id] = {
-                    "id": match["id"],
-                    "summary": summary,
-                    "start_key": start_label,
-                    "task_id": task_id,
-                    "fuzzy_key": fuzzy,
-                    "status": event["extendedProperties"]["private"].get("status", ""),
-                    "priority": event["extendedProperties"]["private"].get("priority", ""),
-                    "colorId": str(event.get("colorId") or ""),
-                }
-                by_fuzzy[fuzzy] = [by_task_id[task_id]]
+                        try:
+                            _update_event(service, calendar_id, match["id"], event)
+                            print(f"  ~ updated  {summary} ({start_label})")
+                            event_id = match["id"]
+                            counts["updated"] += 1
+                        except HttpError as upd_exc:
+                            # Trashed event ids return 410 — recreate fresh
+                            if getattr(upd_exc.resp, "status", None) == 410:
+                                created = _insert_event(service, calendar_id, event)
+                                event_id = created["id"]
+                                print(
+                                    f"  + recreated {summary} ({start_label}) "
+                                    "(previous calendar event was deleted)"
+                                )
+                                counts["created"] += 1
+                                counts["added"] += 1
+                            else:
+                                raise
             else:
                 if dry_run:
                     print(f"  + [dry-run] create {summary} ({start_label})")
-                    fake_id = f"dryrun-{task_id}"
-                    keep_event_ids.add(fake_id)
+                    event_id = f"dryrun-{task_id}"
                 else:
                     created = _insert_event(service, calendar_id, event)
-                    keep_event_ids.add(created["id"])
-                    fake_id = created["id"]
-                meta = {
-                    "id": fake_id,
-                    "summary": summary,
-                    "start_key": start_label,
-                    "task_id": task_id,
-                    "fuzzy_key": fuzzy,
-                    "status": event["extendedProperties"]["private"].get("status", ""),
-                    "priority": event["extendedProperties"]["private"].get("priority", ""),
-                    "colorId": str(event.get("colorId") or ""),
-                }
-                by_task_id[task_id] = meta
-                by_fuzzy[fuzzy] = [meta]
+                    event_id = created["id"]
+                    print(f"  + created  {summary} ({start_label})")
                 counts["created"] += 1
                 counts["added"] += 1
+
+            assert event_id is not None
+            keep_event_ids.add(event_id)
+            meta = {
+                "id": event_id,
+                "summary": summary,
+                "start_key": start_label,
+                "task_id": task_id,
+                "fuzzy_key": fuzzy,
+                "status": event["extendedProperties"]["private"].get("status", ""),
+                "priority": event["extendedProperties"]["private"].get("priority", ""),
+                "colorId": str(event.get("colorId") or ""),
+            }
+            by_task_id[task_id] = meta
+            by_fuzzy[fuzzy] = [meta]
         except HttpError as exc:
             status = getattr(exc.resp, "status", None)
             if status in (403, 404):
