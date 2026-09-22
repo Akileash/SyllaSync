@@ -16,11 +16,7 @@ from config import (
     CANVAS_URL,
 )
 from course_utils import course_matches_allowed, normalize_course_code, parse_allowed_courses
-from date_utils import (
-    apply_lab_monday_due,
-    format_internal_datetime,
-    split_title_and_due,
-)
+from date_utils import apply_lab_monday_due, format_internal_datetime, split_title_and_due
 from retry_utils import with_retries
 from schedule_module import load_schedule
 

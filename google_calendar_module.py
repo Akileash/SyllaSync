@@ -24,11 +24,7 @@ from googleapiclient.errors import HttpError
 
 from config import BASE_DIR, GOOGLE_CALENDAR_ID
 from course_utils import normalize_course_code
-from date_utils import (
-    apply_lab_monday_due,
-    calendar_event_bounds,
-    split_title_and_due,
-)
+from date_utils import apply_lab_monday_due, calendar_event_bounds, split_title_and_due
 from dedupe_module import (
     TASK_ID_COL,
     ensure_task_id,
