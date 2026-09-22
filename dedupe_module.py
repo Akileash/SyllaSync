@@ -21,11 +21,7 @@ from typing import Any
 import pandas as pd
 
 from config import BASE_DIR
-from date_utils import (
-    apply_lab_monday_due,
-    normalize_calendar_date,
-    split_title_and_due,
-)
+from date_utils import apply_lab_monday_due, normalize_calendar_date, split_title_and_due
 from course_utils import courses_equivalent, normalize_course_code, prefer_course_label
 
 logger = logging.getLogger(__name__)
