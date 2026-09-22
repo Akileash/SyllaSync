@@ -214,6 +214,80 @@ def test_section_filter_noop_when_schedule_empty():
 
 
 # ---------------------------------------------------------------------------
+# Masterlist sort order
+# ---------------------------------------------------------------------------
+
+
+def test_sort_submitted_sinks_to_bottom():
+    """Submitted/Complete rows always sort below active work, then by due date."""
+    import pandas as pd
+    from sheets_module import sort_by_days_until_due
+
+    df = pd.DataFrame(
+        [
+            {
+                "Course": "ECE 202",
+                "Assessment title": "Old submitted",
+                "Due Date": "2026-09-16 16:00",
+                "Status": "Submitted",
+                "Priority": "",
+                "Estimated time dedicated to task": "",
+                "Task_ID": "a",
+                "Is Draft": False,
+            },
+            {
+                "Course": "MATH 201",
+                "Assessment title": "HW2",
+                "Due Date": "2026-09-24 17:00",
+                "Status": "Not Started",
+                "Priority": "",
+                "Estimated time dedicated to task": "",
+                "Task_ID": "b",
+                "Is Draft": False,
+            },
+            {
+                "Course": "MAT E 201",
+                "Assessment title": "A1",
+                "Due Date": "2026-09-21 16:00",
+                "Status": "In Progress",
+                "Priority": "",
+                "Estimated time dedicated to task": "",
+                "Task_ID": "c",
+                "Is Draft": False,
+            },
+            {
+                "Course": "MATH 209",
+                "Assessment title": "TBD item",
+                "Due Date": "",
+                "Status": "Not Started",
+                "Priority": "",
+                "Estimated time dedicated to task": "",
+                "Task_ID": "d",
+                "Is Draft": False,
+            },
+            {
+                "Course": "ECE 210",
+                "Assessment title": "Done quiz",
+                "Due Date": "2026-09-16 08:00",
+                "Status": "Complete",
+                "Priority": "",
+                "Estimated time dedicated to task": "",
+                "Task_ID": "e",
+                "Is Draft": False,
+            },
+        ]
+    )
+    sorted_df = sort_by_days_until_due(df)
+    assert sorted_df["Assessment title"].tolist() == [
+        "A1",
+        "HW2",
+        "TBD item",
+        "Done quiz",
+        "Old submitted",
+    ]
+
+
+# ---------------------------------------------------------------------------
 # Calendar obsolete-event diff
 # ---------------------------------------------------------------------------
 
