@@ -14,7 +14,7 @@ from openpyxl.worksheet.datavalidation import DataValidation
 
 from config import EXCEL_FILE_PATH
 from course_utils import prefer_course_label
-from date_utils import split_title_and_due
+from date_utils import apply_math209_online_monday_due, split_title_and_due
 from dedupe_module import (
     TASK_ID_COL,
     dedupe_cross_source,
@@ -219,23 +219,44 @@ def _load_existing_tracker(path: Path) -> pd.DataFrame:
 
 def _sort_by_days_until_due(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Sort assignments soonest-due first (fewest days until due at the top).
+    Sort the tracker so "what comes next" is at the top.
 
-    Missing/unparseable dates sink to the bottom.
+    Order:
+      1. Active work (Not Started / In Progress / …) before finished
+         (Submitted / Complete / Graded / Cancelled)
+      2. Soonest due date first (past-due active work stays near the top)
+      3. Earlier time-of-day within the same calendar day
+      4. Course, then title
+      5. Missing / unparseable due dates sink to the bottom of their group
     """
     if df.empty or "Due Date" not in df.columns:
         return df.reset_index(drop=True)
 
+    from vocab import Status, normalize_status
+
+    finished = {
+        Status.COMPLETE,
+        Status.SUBMITTED,
+        Status.GRADED,
+        Status.CANCELLED,
+    }
+
     out = df.copy()
     out["_sort_date"] = pd.to_datetime(out["Due Date"], errors="coerce")
-    # Normalize to calendar date so time-of-day doesn't scramble same-day order
     out["_sort_day"] = out["_sort_date"].dt.normalize()
+    if "Status" in out.columns:
+        out["_done"] = [
+            1 if normalize_status(s) in finished else 0 for s in out["Status"].tolist()
+        ]
+    else:
+        out["_done"] = 0
+
     out = out.sort_values(
-        by=["_sort_day", "Course", "Assessment title"],
-        ascending=[True, True, True],
+        by=["_done", "_sort_day", "_sort_date", "Course", "Assessment title"],
+        ascending=[True, True, True, True, True],
         na_position="last",
     )
-    return out.drop(columns=["_sort_date", "_sort_day"]).reset_index(drop=True)
+    return out.drop(columns=["_sort_date", "_sort_day", "_done"]).reset_index(drop=True)
 
 
 def _is_droppable_placeholder(title: Any, due: Any = "") -> bool:
@@ -328,6 +349,7 @@ def _merge_tracker(existing: pd.DataFrame, incoming: pd.DataFrame) -> pd.DataFra
         )
         due = row.get("Due Date", "")
         title, due = split_title_and_due(title, due)
+        due = apply_math209_online_monday_due(row["Course"], title, due)
         if _is_droppable_placeholder(title, due):
             continue
         merged_rows.append(
@@ -351,6 +373,7 @@ def _merge_tracker(existing: pd.DataFrame, incoming: pd.DataFrame) -> pd.DataFra
         title = str(row.get("Assessment title", "") or "")
         due = row.get("Due Date", "")
         title, due = split_title_and_due(title, due)
+        due = apply_math209_online_monday_due(row["Course"], title, due)
         # Drop stale phantoms that were written before we filtered them
         if _is_droppable_placeholder(title, due):
             continue

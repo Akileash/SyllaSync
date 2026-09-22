@@ -214,6 +214,68 @@ def test_section_filter_noop_when_schedule_empty():
 
 
 # ---------------------------------------------------------------------------
+# Masterlist sort order
+# ---------------------------------------------------------------------------
+
+
+def test_sort_active_before_submitted_by_due_date():
+    import pandas as pd
+    from sheets_module import sort_by_days_until_due
+
+    df = pd.DataFrame(
+        [
+            {
+                "Course": "ECE 202",
+                "Assessment title": "Old submitted",
+                "Due Date": "2026-09-16 16:00",
+                "Status": "Submitted",
+                "Priority": "",
+                "Estimated time dedicated to task": "",
+                "Task_ID": "a",
+                "Is Draft": False,
+            },
+            {
+                "Course": "MATH 201",
+                "Assessment title": "HW2",
+                "Due Date": "2026-09-24 17:00",
+                "Status": "Not Started",
+                "Priority": "",
+                "Estimated time dedicated to task": "",
+                "Task_ID": "b",
+                "Is Draft": False,
+            },
+            {
+                "Course": "MAT E 201",
+                "Assessment title": "A1",
+                "Due Date": "2026-09-21 16:00",
+                "Status": "In Progress",
+                "Priority": "",
+                "Estimated time dedicated to task": "",
+                "Task_ID": "c",
+                "Is Draft": False,
+            },
+            {
+                "Course": "MATH 209",
+                "Assessment title": "TBD item",
+                "Due Date": "",
+                "Status": "Not Started",
+                "Priority": "",
+                "Estimated time dedicated to task": "",
+                "Task_ID": "d",
+                "Is Draft": False,
+            },
+        ]
+    )
+    sorted_df = sort_by_days_until_due(df)
+    assert sorted_df["Assessment title"].tolist() == [
+        "A1",
+        "HW2",
+        "TBD item",
+        "Old submitted",
+    ]
+
+
+# ---------------------------------------------------------------------------
 # Calendar obsolete-event diff
 # ---------------------------------------------------------------------------
 
@@ -359,6 +421,40 @@ def test_assignment_one_fuzzy_key():
     )
 
 
+def test_split_title_monday_sept_22_snaps_to_21(monkeypatch):
+    import date_utils
+
+    monkeypatch.setattr("config.TERM_YEAR", 2026)
+    title, due = date_utils.split_title_and_due(
+        "Online Assignment 1- Due date Monday Sept 22"
+    )
+    assert title == "Online Assignment 1"
+    assert due.startswith("2026-09-21")
+
+
+def test_math209_online_assignment_snaps_tuesday_to_monday():
+    from date_utils import apply_math209_online_monday_due
+
+    assert (
+        apply_math209_online_monday_due(
+            "MATH 209", "Online Assignment 2", "2026-10-06 23:45"
+        )
+        == "2026-10-05 23:45"
+    )
+    # MATH 201 HW stays on Thursday
+    assert (
+        apply_math209_online_monday_due("MATH 201", "HW2", "2026-09-24 17:00")
+        == "2026-09-24 17:00"
+    )
+    # Saturday OA6 → previous Monday
+    assert (
+        apply_math209_online_monday_due(
+            "MATH 209", "Online Assignment 6", "2026-12-05 23:45"
+        )
+        == "2026-11-30 23:45"
+    )
+
+
 def test_split_title_and_due_moves_date_out_of_title(monkeypatch):
     import date_utils
 
@@ -375,7 +471,8 @@ def test_split_title_and_due_moves_date_out_of_title(monkeypatch):
         "Online Assignment 1- Due date Monday Sept 22", ""
     )
     assert title2 == "Online Assignment 1"
-    assert due2.startswith("2026-09-22")
+    # Sept 22 2026 is Tuesday; title says Monday → snap to Sept 21
+    assert due2.startswith("2026-09-21")
 
     # Multiline Canvas-style title
     title_nl, due_nl = date_utils.split_title_and_due(

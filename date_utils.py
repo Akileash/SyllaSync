@@ -222,6 +222,77 @@ def format_internal_datetime(value: Any) -> str:
     return parsed.strftime("%Y-%m-%d")
 
 
+_WEEKDAY_NAME_TO_INDEX = {
+    "mon": 0,
+    "monday": 0,
+    "tue": 1,
+    "tues": 1,
+    "tuesday": 1,
+    "wed": 2,
+    "wednesday": 2,
+    "thu": 3,
+    "thur": 3,
+    "thurs": 3,
+    "thursday": 3,
+    "fri": 4,
+    "friday": 4,
+    "sat": 5,
+    "saturday": 5,
+    "sun": 6,
+    "sunday": 6,
+}
+
+
+def snap_due_to_weekday(value: Any, target_weekday: int) -> str:
+    """
+    Move a due datetime backward to the given weekday (Mon=0 … Sun=6).
+
+    Keeps the time-of-day. No-op if already on that weekday or unparseable.
+    Used when reused last-year dates land on the wrong weekday (e.g. Tuesday
+    instead of Monday).
+    """
+    text = format_internal_datetime(value)
+    if not text or text.lower() in MISSING_DATE_VALUES:
+        return str(value or "").strip()
+
+    dt = parse_due_datetime(text)
+    if dt is None:
+        return text
+
+    delta = (dt.weekday() - int(target_weekday)) % 7
+    if delta:
+        dt = dt - timedelta(days=delta)
+
+    if has_explicit_time(text):
+        return dt.strftime("%Y-%m-%d %H:%M")
+    return dt.strftime("%Y-%m-%d")
+
+
+def snap_due_to_monday(value: Any) -> str:
+    """Snap a due date backward onto Monday (common for MATH 209 online HW)."""
+    return snap_due_to_weekday(value, 0)
+
+
+def apply_math209_online_monday_due(course: Any, title: Any, due: Any) -> str:
+    """
+    MATH 209 Online Assignments are always due Monday.
+
+    Canvas often reuses last year's titles/dates (e.g. 'Monday Sept 22' when
+    the 22nd is Tuesday). Snap those dues back to Monday.
+    """
+    course_text = str(course or "")
+    title_text = str(title or "")
+    due_text = str(due or "").strip()
+    if not due_text or due_text.lower() in MISSING_DATE_VALUES:
+        return due_text
+
+    if not re.search(r"MATH\s*209", course_text, re.IGNORECASE):
+        return due_text
+    if not re.search(r"online\s*assignment", title_text, re.IGNORECASE):
+        return due_text
+    return snap_due_to_monday(due_text)
+
+
 # Pull "Due date …" / "due …" clauses out of Canvas/syllabus titles
 # (may appear on the same line or after a newline).
 _EMBEDDED_DUE_RE = re.compile(
@@ -229,9 +300,9 @@ _EMBEDDED_DUE_RE = re.compile(
     [\s\-–—:,]*                 # separators before the due clause
     (?:due\s*date|due\s*by|due)\s*[:\-]?\s*
     (?:
-        (?:mon|tue|wed|thu|fri|sat|sun)[a-z]*\s+  # optional weekday
+        (?P<weekday>mon|tue|tues|wed|thu|thur|thurs|fri|sat|sun)[a-z]*\s+
     )?
-    (
+    (?P<when>
         # Month Day[, Year][, time]
         (?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)[a-z]*
         \s+\d{1,2}
@@ -267,6 +338,9 @@ def split_title_and_due(title: Any, existing_due: Any = "") -> tuple[str, str]:
     Example:
       "Online Assignment 2- Due date Oct 6, 11:45 PM"
         → ("Online Assignment 2", "2026-10-06 23:45")
+
+    If the title names a weekday (e.g. "Monday Sept 22") and that date is not
+    that weekday, snap the due date backward onto the named weekday.
     """
     from config import TERM_YEAR  # local import avoids circular load at import time
 
@@ -287,7 +361,8 @@ def split_title_and_due(title: Any, existing_due: Any = "") -> tuple[str, str]:
     if not match:
         return re.sub(r"[\s\-–—]+$", "", raw_flat).strip() or raw_flat, existing
 
-    due_fragment = match.group(1).strip()
+    due_fragment = (match.group("when") or "").strip()
+    weekday_token = (match.group("weekday") or "").strip().lower()
     clean_title = raw_flat[: match.start()].strip(" -\u2013\u2014:,\t")
     clean_title = re.sub(r"[\s\-–—]+$", "", clean_title).strip() or raw_flat
 
@@ -304,7 +379,15 @@ def split_title_and_due(title: Any, existing_due: Any = "") -> tuple[str, str]:
 
     # Prefer a real API/structured due when present; still always return clean_title
     if existing and normalize_calendar_date(existing):
-        return clean_title, existing
-    if parsed_due and normalize_calendar_date(parsed_due):
-        return clean_title, parsed_due
-    return clean_title, existing
+        due_out = existing
+    elif parsed_due and normalize_calendar_date(parsed_due):
+        due_out = parsed_due
+    else:
+        due_out = existing
+
+    if due_out and weekday_token:
+        target = _WEEKDAY_NAME_TO_INDEX.get(weekday_token)
+        if target is not None:
+            due_out = snap_due_to_weekday(due_out, target)
+
+    return clean_title, due_out

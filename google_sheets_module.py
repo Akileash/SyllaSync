@@ -23,6 +23,7 @@ from gspread.exceptions import APIError, SpreadsheetNotFound
 
 from config import BASE_DIR, GOOGLE_SHEET_ID
 from date_utils import (
+    apply_math209_online_monday_due,
     format_internal_datetime,
     format_sheet_date,
     format_sheet_time,
@@ -207,6 +208,7 @@ def _row_to_internal(row_values: list[Any], row_number: int) -> dict[str, Any] |
 
     # Clean titles that still contain "Due date …" from older syncs
     title, combined_due = split_title_and_due(title, combined_due)
+    combined_due = apply_math209_online_monday_due(course, title, combined_due)
 
     return {
         "_row": row_number,
@@ -232,6 +234,7 @@ def _internal_to_masterlist_row(record: dict[str, Any]) -> list[Any] | None:
     title = str(record.get("Assessment title", "") or "")
     due_raw = record.get("Due Date", "")
     clean_title, due_raw = split_title_and_due(title, due_raw)
+    due_raw = apply_math209_online_monday_due(record.get("Course", ""), clean_title, due_raw)
     if is_droppable_placeholder(clean_title, due_raw):
         # Signal caller to skip this row entirely
         return None
