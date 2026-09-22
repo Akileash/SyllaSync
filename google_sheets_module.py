@@ -417,7 +417,8 @@ def _write_masterlist_rows(
     dry_run: bool = False,
 ) -> int:
     """
-    Write merged data to Masterlist columns A–H, ordered by days until due.
+    Write merged data to Masterlist columns A–H.
+    Active rows are ordered soonest-due first; Submitted/Complete sink to the bottom.
     Formula columns (I+) are left untouched.
     """
     if merged_df.empty:
@@ -483,9 +484,13 @@ def _write_masterlist_rows(
             worksheet, DATA_START_ROW, DATA_START_ROW + written - 1
         )
         logger.info(
-            "Masterlist rewritten in days-until-due order (%d row(s)).", written
+            "Masterlist rewritten (active soonest-first; submitted at bottom) (%d row(s)).",
+            written,
         )
-        print(f"      Sorted Masterlist by days until due ({written} row(s)).")
+        print(
+            f"      Sorted Masterlist: active soonest-first, "
+            f"submitted at bottom ({written} row(s))."
+        )
 
     return written
 
