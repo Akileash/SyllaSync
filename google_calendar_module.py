@@ -24,11 +24,7 @@ from googleapiclient.errors import HttpError
 
 from config import BASE_DIR, GOOGLE_CALENDAR_ID
 from course_utils import normalize_course_code
-from date_utils import (
-    apply_math209_online_monday_due,
-    calendar_event_bounds,
-    split_title_and_due,
-)
+from date_utils import apply_math209_monday_due, calendar_event_bounds, split_title_and_due
 from dedupe_module import (
     TASK_ID_COL,
     ensure_task_id,
@@ -130,7 +126,7 @@ def _build_event(record: dict[str, Any]) -> dict[str, Any] | None:
     course = str(record.get("Course", "") or "").strip()
     due_raw = record.get("Due Date", "")
     title, due_raw = split_title_and_due(title, due_raw)
-    due_raw = apply_math209_online_monday_due(course, title, due_raw)
+    due_raw = apply_math209_monday_due(course, title, due_raw)
     # Never create events for bare "Labs" / "Assignments" placeholders
     if is_droppable_placeholder(title, due_raw):
         return None

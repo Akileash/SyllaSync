@@ -14,7 +14,7 @@ from openpyxl.worksheet.datavalidation import DataValidation
 
 from config import EXCEL_FILE_PATH
 from course_utils import prefer_course_label
-from date_utils import apply_math209_online_monday_due, split_title_and_due
+from date_utils import apply_math209_monday_due, split_title_and_due
 from dedupe_module import (
     TASK_ID_COL,
     dedupe_cross_source,
@@ -223,7 +223,7 @@ def _sort_by_days_until_due(df: pd.DataFrame) -> pd.DataFrame:
 
     Order:
       1. Active work (Not Started / In Progress / …) before finished
-         (Submitted / Complete / Graded / Cancelled)
+         (Submitted / Complete / Graded / Cancelled) — finished sinks to bottom
       2. Soonest due date first (past-due active work stays near the top)
       3. Earlier time-of-day within the same calendar day
       4. Course, then title
@@ -291,6 +291,7 @@ def _merge_tracker(existing: pd.DataFrame, incoming: pd.DataFrame) -> pd.DataFra
             title = str(row.get("Assessment title", "") or "")
             due = row.get("Due Date", "")
             title, due = split_title_and_due(title, due)
+            due = apply_math209_monday_due(row.get("Course", ""), title, due)
             if _is_droppable_placeholder(title, due):
                 continue
             rec = {col: row.get(col, "") for col in df.columns}
@@ -349,7 +350,7 @@ def _merge_tracker(existing: pd.DataFrame, incoming: pd.DataFrame) -> pd.DataFra
         )
         due = row.get("Due Date", "")
         title, due = split_title_and_due(title, due)
-        due = apply_math209_online_monday_due(row["Course"], title, due)
+        due = apply_math209_monday_due(row["Course"], title, due)
         if _is_droppable_placeholder(title, due):
             continue
         merged_rows.append(
@@ -373,7 +374,7 @@ def _merge_tracker(existing: pd.DataFrame, incoming: pd.DataFrame) -> pd.DataFra
         title = str(row.get("Assessment title", "") or "")
         due = row.get("Due Date", "")
         title, due = split_title_and_due(title, due)
-        due = apply_math209_online_monday_due(row["Course"], title, due)
+        due = apply_math209_monday_due(row.get("Course", ""), title, due)
         # Drop stale phantoms that were written before we filtered them
         if _is_droppable_placeholder(title, due):
             continue

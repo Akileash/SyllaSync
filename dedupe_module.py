@@ -21,11 +21,7 @@ from typing import Any
 import pandas as pd
 
 from config import BASE_DIR
-from date_utils import (
-    apply_math209_online_monday_due,
-    normalize_calendar_date,
-    split_title_and_due,
-)
+from date_utils import apply_math209_monday_due, normalize_calendar_date, split_title_and_due
 from course_utils import courses_equivalent, normalize_course_code, prefer_course_label
 
 logger = logging.getLogger(__name__)
@@ -382,7 +378,7 @@ def dedupe_cross_source(
         title = item.get("Task", "")
         due = item.get("Due Date", "")
         title, due = split_title_and_due(title, due)
-        due = apply_math209_online_monday_due(course, title, due)
+        due = apply_math209_monday_due(course, title, due)
         canvas_id = item.get("Canvas ID") or item.get("assignment_id")
         preferred = (
             canvas_task_id(canvas_id)
@@ -422,7 +418,7 @@ def dedupe_cross_source(
         title = item.get("Task", "")
         due = item.get("Due Date", "")
         title, due = split_title_and_due(title, due)
-        due = apply_math209_online_monday_due(course, title, due)
+        due = apply_math209_monday_due(course, title, due)
         phantom = is_phantom_task(title, due)
         # Category phantoms (bare "Labs", "Assignments") are never kept —
         # they pollute Discord/Calendar even when a nearby PDF date was attached.

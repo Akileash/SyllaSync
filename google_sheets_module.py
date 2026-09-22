@@ -23,7 +23,7 @@ from gspread.exceptions import APIError, SpreadsheetNotFound
 
 from config import BASE_DIR, GOOGLE_SHEET_ID
 from date_utils import (
-    apply_math209_online_monday_due,
+    apply_math209_monday_due,
     format_internal_datetime,
     format_sheet_date,
     format_sheet_time,
@@ -208,7 +208,7 @@ def _row_to_internal(row_values: list[Any], row_number: int) -> dict[str, Any] |
 
     # Clean titles that still contain "Due date …" from older syncs
     title, combined_due = split_title_and_due(title, combined_due)
-    combined_due = apply_math209_online_monday_due(course, title, combined_due)
+    combined_due = apply_math209_monday_due(course, title, combined_due)
 
     return {
         "_row": row_number,
@@ -234,7 +234,7 @@ def _internal_to_masterlist_row(record: dict[str, Any]) -> list[Any] | None:
     title = str(record.get("Assessment title", "") or "")
     due_raw = record.get("Due Date", "")
     clean_title, due_raw = split_title_and_due(title, due_raw)
-    due_raw = apply_math209_online_monday_due(record.get("Course", ""), clean_title, due_raw)
+    due_raw = apply_math209_monday_due(record.get("Course", ""), clean_title, due_raw)
     if is_droppable_placeholder(clean_title, due_raw):
         # Signal caller to skip this row entirely
         return None
@@ -420,7 +420,8 @@ def _write_masterlist_rows(
     dry_run: bool = False,
 ) -> int:
     """
-    Write merged data to Masterlist columns A–H, ordered by days until due.
+    Write merged data to Masterlist columns A–H.
+    Active rows are ordered soonest-due first; Submitted/Complete sink to the bottom.
     Formula columns (I+) are left untouched.
     """
     if merged_df.empty:
@@ -486,9 +487,13 @@ def _write_masterlist_rows(
             worksheet, DATA_START_ROW, DATA_START_ROW + written - 1
         )
         logger.info(
-            "Masterlist rewritten in days-until-due order (%d row(s)).", written
+            "Masterlist rewritten (active soonest-first; submitted at bottom) (%d row(s)).",
+            written,
         )
-        print(f"      Sorted Masterlist by days until due ({written} row(s)).")
+        print(
+            f"      Sorted Masterlist: active soonest-first, "
+            f"submitted at bottom ({written} row(s))."
+        )
 
     return written
 
