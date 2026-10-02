@@ -246,18 +246,18 @@ def _parse_gemini_response(raw_text: str) -> list[dict[str, str]]:
     for item in data:
         if not isinstance(item, dict):
             continue
-            clean_task, clean_due = split_title_and_due(
-                item.get("Task", "Unknown"),
-                item.get("Due Date", "TBD"),
-            )
-            results.append(
-                {
-                    "Source": "Syllabus",
-                    "Course": str(item.get("Course", "Unknown")),
-                    "Task": clean_task,
-                    "Due Date": clean_due or "TBD",
-                }
-            )
+        clean_task, clean_due = split_title_and_due(
+            item.get("Task", "Unknown"),
+            item.get("Due Date", "TBD"),
+        )
+        results.append(
+            {
+                "Source": "Syllabus",
+                "Course": str(item.get("Course", "Unknown")),
+                "Task": clean_task,
+                "Due Date": clean_due or "TBD",
+            }
+        )
     return results
 
 
