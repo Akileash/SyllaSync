@@ -55,6 +55,122 @@ def test_masterlist_status_cell_is_submitted_for_legacy_complete():
     assert row is not None
     assert row[1] == "Submitted"
 
+    graded = _internal_to_masterlist_row(
+        {
+            "Course": "COURSE 101",
+            "Assessment title": "HW1",
+            "Due Date": "2026-10-01 17:00",
+            "Status": "Graded",
+            "Task_ID": "canvas_1",
+        }
+    )
+    assert graded is not None
+    assert graded[1] == "Graded"
+
+    done = _internal_to_masterlist_row(
+        {
+            "Course": "COURSE 101",
+            "Assessment title": "HW1",
+            "Due Date": "2026-10-01 17:00",
+            "Status": "Done",
+            "Task_ID": "canvas_1",
+        }
+    )
+    assert done is not None
+    assert done[1] == "Submitted"
+
+
+def test_finished_statuses_tie_so_sheet_value_wins():
+    from vocab import SHEET_STATUS_LABELS, choose_status, preserve_sheet_label, status_rank
+
+    assert "Graded" in SHEET_STATUS_LABELS
+    assert preserve_sheet_label("Graded") == "Graded"
+    assert preserve_sheet_label("Complete") == "Submitted"
+    assert preserve_sheet_label("Done") == "Submitted"
+    assert status_rank("Graded") == status_rank("Submitted")
+    assert status_rank("Done") == status_rank("Complete") == status_rank("Cancelled")
+    assert choose_status("Graded", "Submitted") == "Graded"
+    assert choose_status("Submitted", "Graded") == "Submitted"
+    assert choose_status("Submitted", "Not Started") == "Submitted"
+    assert choose_status("Not Started", "Done") == "Submitted"
+    assert choose_status("In Progress", "Not Started") == "In Progress"
+    for label in (
+        choose_status("Graded", "Complete"),
+        choose_status("Complete", "Graded"),
+        choose_status("", "completed"),
+        choose_status("Done", "Submitted"),
+    ):
+        assert label.lower() not in {"complete", "completed"}
+
+
+def test_merge_keeps_typed_graded_over_synced_submitted(tmp_path, monkeypatch):
+    import pandas as pd
+
+    from dedupe_module import TASK_ID_COL
+    from sheets_module import merge_tracker
+
+    monkeypatch.setattr("dedupe_module.STATE_PATH", tmp_path / "state.json")
+    existing = pd.DataFrame(
+        [
+            {
+                "Course": "COURSE 101",
+                "Assessment title": "HW1",
+                "Due Date": "2026-10-01",
+                "Estimated time dedicated to task": "",
+                "Status": "Graded",
+                "Priority": "",
+                TASK_ID_COL: "canvas_1",
+                "Is Draft": False,
+            }
+        ]
+    )
+    incoming = pd.DataFrame(
+        [
+            {
+                "Course": "COURSE 101",
+                "Assessment title": "HW1",
+                "Due Date": "2026-10-01",
+                TASK_ID_COL: "canvas_1",
+                "Is Draft": False,
+                "Status": "Submitted",
+                "Source": "Canvas",
+            }
+        ]
+    )
+    merged = merge_tracker(existing, incoming)
+    assert merged.iloc[0]["Status"] == "Graded"
+
+
+def test_tzdata_age_check():
+    from config import MIN_TZDATA_VERSION, tzdata_is_old
+
+    assert MIN_TZDATA_VERSION == "2026.5"
+    assert tzdata_is_old("2025.1") is True
+    assert tzdata_is_old("2026.4") is True
+    assert tzdata_is_old("2026.5") is False
+    assert tzdata_is_old("2026.10") is False
+    assert tzdata_is_old("") is True
+
+
+def test_edmonton_stays_utc_minus_6_after_november_2026():
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    # 2 Nov 2026 is after the old DST fallback. Alberta no longer leaves UTC-6.
+    moment = datetime(2026, 11, 2, 12, 0, tzinfo=ZoneInfo("America/Edmonton"))
+    offset = moment.utcoffset()
+    assert offset is not None
+    assert offset.total_seconds() == -6 * 3600
+
+
+def test_sheet_probe_is_read_only_unless_write(monkeypatch):
+    import test_sheets
+
+    monkeypatch.setattr(sys, "argv", ["test_sheets.py"])
+    assert test_sheets.parse_args().write is False
+    monkeypatch.setattr(sys, "argv", ["test_sheets.py", "--write"])
+    assert test_sheets.parse_args().write is True
+
 
 def test_placeholder_detection_does_not_require_the_secret_value():
     assert is_placeholder("your_canvas_api_token") is True

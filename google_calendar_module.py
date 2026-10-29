@@ -35,7 +35,7 @@ from dedupe_module import (
 )
 from retry_utils import with_retries
 from safe_text import explain_google_auth_failure, is_google_auth_failure, redact_text
-from vocab import calendar_color, calendar_summary_prefix, normalize_status
+from vocab import calendar_color, calendar_summary_prefix, normalize_status, preserve_sheet_label
 
 logger = logging.getLogger(__name__)
 
@@ -149,7 +149,8 @@ def _build_event(record: dict[str, Any]) -> dict[str, Any] | None:
     summary = f"{prefix}{base_summary}"
 
     priority = str(record.get("Priority", "") or "").strip() or "—"
-    status = str(record.get("Status", "") or "").strip() or "—"
+    raw_status = str(record.get("Status", "") or "").strip()
+    status = preserve_sheet_label(raw_status) if raw_status else "—"
     est_time = str(
         record.get("Estimated time dedicated to task", "") or ""
     ).strip() or "—"

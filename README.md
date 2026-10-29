@@ -30,7 +30,7 @@ Sheet and Excel statuses are only:
 - Graded
 - Cancelled
 
-**Submitted** is the finished status. The program never writes the word Complete. Submitted calendar events use the title prefix `[SUBMITTED] `.
+**Submitted** is the finished status. When the pipeline assigns a status, Graded, Done, Complete, and Completed all become Submitted. The program never writes the word Complete. If the Sheet already says Graded (or another finished label), that typed value is kept, because finished statuses rank the same. The dropdown still accepts Graded so existing cells do not fail validation. Submitted calendar events, including ones that came in as Graded or Done, use the title prefix `[SUBMITTED] `.
 
 Columns on the Masterlist tab stay A–H:
 
@@ -112,7 +112,7 @@ Put secrets in `.env` or `local.env` in the project folder. `local.env` override
 | `GEMINI_API_KEY` | No | Enables Gemini PDF parsing |
 | `GEMINI_MODEL` | No | Defaults to `gemini-3.6-flash` |
 | `ALLOWED_COURSES` | No | Comma-separated codes. Blank includes every active Canvas course |
-| `LOCAL_TIMEZONE` | No | IANA name. Default `America/Edmonton` |
+| `LOCAL_TIMEZONE` | No | IANA name. Default `America/Edmonton`. Needs `tzdata>=2026.5` so Alberta stays on UTC−6 after 2026-11-01 |
 | `TERM_YEAR` | No | Four-digit year. Default is the current calendar year |
 | `CANVAS_PAST_DUE_DAYS` | No | How many days of past-due Canvas work to keep. Default `21` |
 | `EXCEL_FILE_PATH` | No | Local workbook path. Default `assignments.xlsx` |
@@ -193,7 +193,8 @@ Run these from the project folder with the virtual environment activated.
 | `python main.py --syllabus-only` | Skip Canvas. Implies `--allow-partial` |
 | `python main.py --allow-partial` | Continue after a Canvas failure. Sheet writes use what is left. Calendar deletes stay off |
 | `python main.py` | Local Excel dashboard only (no Google, Calendar, or Discord) |
-| `python test_sheets.py` | Live Sheet test. This writes `Connection Successful!` into Masterlist cell A1. Skip it unless you mean to |
+| `python test_sheets.py` | Live read-only check that the service account can open Masterlist. Prints cell A1 and does not change the Sheet |
+| `python test_sheets.py --write` | Same check, then writes `Connection Successful!` into Masterlist cell A1 |
 | `python export_dashboard.py` | Rebuild `Sylla_Sync_Dashboard.xlsx` from `assignments.xlsx` |
 | `python -m pytest tests/ -q` | Run the test suite |
 
@@ -230,6 +231,7 @@ The tests use fake data. They do not call your Canvas, Google, or Discord accoun
 | Gemini returned malformed JSON | That PDF is skipped. The raw reply is not logged |
 | `ModuleNotFoundError` | Activate the virtual environment and run `pip install -r requirements.txt` |
 | Excel file locked / OneDrive | Close the workbook and wait for OneDrive to finish syncing, then re-run |
+| Warning about tzdata older than 2026.5 | `pip install "tzdata>=2026.5"` and re-run. Alberta stays on UTC−6 from November 2026; older data still shifts America/Edmonton |
 | Odd characters or a crash on print (Windows) | Keep the files UTF-8. The program asks the console for UTF-8 |
 | First key in `.env` is ignored | The file had a BOM on an older setup. Current versions accept a UTF-8 BOM |
 | Wrong lab section | Fix `section` in `schedule.json` and re-run |
