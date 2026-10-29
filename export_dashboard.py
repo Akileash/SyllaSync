@@ -25,7 +25,7 @@ COLUMNS = [
     "Priority",
 ]
 
-STATUS_OPTIONS = ["Not Started", "In Progress", "Completed"]
+STATUS_OPTIONS = ["Not Started", "In Progress", "Submitted", "Graded", "Cancelled"]
 PRIORITY_OPTIONS = ["Low", "Medium", "High"]
 
 FONT_NAME = "Segoe UI"
@@ -49,7 +49,11 @@ def load_and_clean(input_path: Path) -> pd.DataFrame:
     df = df.reindex(columns=COLUMNS)
 
     df["Due Date"] = pd.to_datetime(df["Due Date"], errors="coerce")
-    df["Status"] = df["Status"].fillna("Not Started").replace("", "Not Started")
+    from vocab import sheet_status
+
+    df["Status"] = df["Status"].map(
+        lambda value: sheet_status(value) if str(value or "").strip() else "Not Started"
+    )
     df["Priority"] = df["Priority"].fillna("Unassigned").replace("", "Unassigned")
 
     for col in ("Course", "Assessment title", "Estimated time dedicated to task"):
@@ -215,7 +219,6 @@ def export_dashboard(input_path: Path, output_path: Path) -> pd.DataFrame:
 
         # --- Conditional formatting ---
         status_letter = xl_col_to_name(status_col)
-        priority_letter = xl_col_to_name(priority_col)
         due_letter = xl_col_to_name(COLUMNS.index("Due Date"))
         table_range = f"A2:{xl_col_to_name(last_col)}{last_row + 1}"
 
@@ -262,12 +265,16 @@ def export_dashboard(input_path: Path, output_path: Path) -> pd.DataFrame:
             },
         )
 
-        # Completed: strikethrough + gray across entire row
+        # Finished rows: strikethrough + gray. Includes legacy Complete/Done labels.
         worksheet.conditional_format(
             table_range,
             {
                 "type": "formula",
-                "criteria": f'=${status_letter}2="Completed"',
+                "criteria": (
+                    f'=OR({status_letter}2="Submitted",{status_letter}2="Graded",'
+                    f'{status_letter}2="Cancelled",{status_letter}2="Done",'
+                    f'{status_letter}2="Completed")'
+                ),
                 "format": completed_row_fmt,
             },
         )

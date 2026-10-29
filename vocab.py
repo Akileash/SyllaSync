@@ -41,30 +41,41 @@ _STATUS_ALIASES: dict[str, Status] = {
     "cancelled": Status.CANCELLED,
     "canceled": Status.CANCELLED,
     "dropped": Status.CANCELLED,
-    "complete": Status.COMPLETE,
-    "completed": Status.COMPLETE,
-    "done": Status.COMPLETE,
+    # Finished work is Submitted. Never keep a "Complete" status that would
+    # be written back to the Sheet.
+    "complete": Status.SUBMITTED,
+    "completed": Status.SUBMITTED,
+    "done": Status.SUBMITTED,
 }
 
 # Canonical → Google Sheets / HHS template dropdown
+# Sheet / Excel labels. The string "Complete" is intentionally absent.
 STATUS_TO_SHEET: dict[Status, str] = {
     Status.TODO: "Not Started",
     Status.IN_PROGRESS: "In Progress",
     Status.SUBMITTED: "Submitted",
-    Status.GRADED: "Complete",
-    Status.CANCELLED: "N/A",
-    Status.COMPLETE: "Complete",
+    Status.GRADED: "Graded",
+    Status.CANCELLED: "Cancelled",
+    Status.COMPLETE: "Submitted",
 }
 
-# Canonical → local Excel dropdown
+# Canonical → local Excel dropdown (same five labels as the Sheet)
 STATUS_TO_EXCEL: dict[Status, str] = {
-    Status.TODO: "Not started",
+    Status.TODO: "Not Started",
     Status.IN_PROGRESS: "In Progress",
-    Status.SUBMITTED: "Done",
-    Status.GRADED: "Done",
-    Status.CANCELLED: "Done",
-    Status.COMPLETE: "Done",
+    Status.SUBMITTED: "Submitted",
+    Status.GRADED: "Graded",
+    Status.CANCELLED: "Cancelled",
+    Status.COMPLETE: "Submitted",
 }
+
+SHEET_STATUS_LABELS = (
+    "Not Started",
+    "In Progress",
+    "Submitted",
+    "Graded",
+    "Cancelled",
+)
 
 _PRIORITY_ALIASES: dict[str, Priority] = {
     "": Priority.MEDIUM,
@@ -127,12 +138,19 @@ def normalize_priority(value: object) -> Priority:
     return _PRIORITY_ALIASES.get(key, Priority.MEDIUM)
 
 
+def _forbid_complete(label: str) -> str:
+    """Last-line guard so a status write can never be the word Complete."""
+    if str(label).strip().lower() in {"complete", "completed"}:
+        return "Submitted"
+    return label
+
+
 def sheet_status(value: object) -> str:
-    return STATUS_TO_SHEET[normalize_status(value)]
+    return _forbid_complete(STATUS_TO_SHEET[normalize_status(value)])
 
 
 def excel_status(value: object) -> str:
-    return STATUS_TO_EXCEL[normalize_status(value)]
+    return _forbid_complete(STATUS_TO_EXCEL[normalize_status(value)])
 
 
 def excel_priority(value: object) -> str:
@@ -149,9 +167,9 @@ def calendar_color(status: object, priority: object) -> str:
 
 def calendar_summary_prefix(status: object) -> str:
     st = normalize_status(status)
-    if st in {Status.COMPLETE, Status.GRADED}:
-        return "[DONE] "
-    if st == Status.SUBMITTED:
+    # Submitted is the finished status. Graded and legacy Complete aliases
+    # share the same calendar prefix; the word "Complete" is never written.
+    if st in {Status.COMPLETE, Status.GRADED, Status.SUBMITTED}:
         return "[SUBMITTED] "
     if st == Status.CANCELLED:
         return "[CANCELLED] "

@@ -2,13 +2,10 @@
 
 from __future__ import annotations
 
-import json
 from datetime import datetime
-from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import pandas as pd
-import pytest
 
 from canvas_module import section_allowed
 from date_utils import (
@@ -26,7 +23,6 @@ from dedupe_module import (
     is_phantom_task,
     promote_task_id,
     resolve_persisted_task_id,
-    syllabus_task_id,
 )
 from google_calendar_module import compute_obsolete_event_ids
 from vocab import calendar_color, calendar_summary_prefix, normalize_status, sheet_status
@@ -390,12 +386,20 @@ def test_build_event_sets_confirmed_status():
 def test_vocab_status_sheet_mapping():
     assert sheet_status("not started") == "Not Started"
     assert sheet_status("submitted") == "Submitted"
-    assert normalize_status("done").value == "COMPLETE"
+    assert sheet_status("graded") == "Graded"
+    assert sheet_status("cancelled") == "Cancelled"
+    assert sheet_status("done") == "Submitted"
+    assert sheet_status("complete") == "Submitted"
+    assert sheet_status("completed") == "Submitted"
+    assert normalize_status("done").value == "SUBMITTED"
+    for sample in ("Complete", "completed", "DONE", "Graded", "Submitted", "N/A"):
+        assert sheet_status(sample).lower() != "complete"
 
 
 def test_calendar_status_prefix_and_color():
-    assert calendar_summary_prefix("Complete").startswith("[DONE]")
-    assert calendar_summary_prefix("Submitted").startswith("[SUBMITTED]")
+    assert calendar_summary_prefix("Complete").startswith("[SUBMITTED]")
+    assert calendar_summary_prefix("Graded").startswith("[SUBMITTED]")
+    assert calendar_summary_prefix("Submitted") == "[SUBMITTED] "
     assert calendar_color("Complete", "High") == "2"
     assert calendar_color("Not Started", "High") == "11"
 
@@ -449,7 +453,8 @@ def test_split_title_and_due_moves_date_out_of_title(monkeypatch):
         "Online Assignment 1- Due date Monday Sept 22", ""
     )
     assert title2 == "Online Assignment 1"
-    assert due2.startswith("2026-09-22")
+    # 22 Sept 2026 is a Tuesday. The weekday word wins and snaps back to Monday.
+    assert due2.startswith("2026-09-21")
 
     # Multiline Canvas-style title
     title_nl, due_nl = date_utils.split_title_and_due(

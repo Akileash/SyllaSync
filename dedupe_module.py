@@ -15,14 +15,14 @@ import json
 import logging
 import re
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
 from typing import Any
 
 import pandas as pd
 
 from config import BASE_DIR
+from safe_text import read_json, redact_text
 from date_utils import apply_math209_monday_due, normalize_calendar_date, split_title_and_due
-from course_utils import courses_equivalent, normalize_course_code, prefer_course_label
+from course_utils import courses_equivalent, normalize_course_code
 
 logger = logging.getLogger(__name__)
 
@@ -228,14 +228,18 @@ def load_task_state() -> dict[str, Any]:
     if not STATE_PATH.exists():
         return {"by_match_key": {}, "aliases": {}}
     try:
-        data = json.loads(STATE_PATH.read_text(encoding="utf-8"))
+        data = read_json(STATE_PATH)
         if not isinstance(data, dict):
             return {"by_match_key": {}, "aliases": {}}
         data.setdefault("by_match_key", {})
         data.setdefault("aliases", {})
         return data
-    except (OSError, json.JSONDecodeError) as exc:
-        logger.warning("Could not read task state file: %s", exc)
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        logger.warning(
+            "Could not read task state file (%s). Starting with an empty map. %s",
+            STATE_PATH.name,
+            redact_text(exc),
+        )
         return {"by_match_key": {}, "aliases": {}}
 
 
@@ -243,7 +247,12 @@ def save_task_state(state: dict[str, Any]) -> None:
     try:
         STATE_PATH.write_text(json.dumps(state, indent=2, sort_keys=True), encoding="utf-8")
     except OSError as exc:
-        logger.warning("Could not write task state file: %s", exc)
+        logger.warning(
+            "Could not write %s. If OneDrive or another program has the file open, "
+            "close it and re-run. %s",
+            STATE_PATH.name,
+            redact_text(exc),
+        )
 
 
 def hydrate_state_from_rows(rows: list[dict[str, Any]], state: dict[str, Any] | None = None) -> dict[str, Any]:

@@ -13,6 +13,7 @@ A companion SyllaSync_Meta sheet mirrors Task_ID for cross-machine hydration.
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from typing import Any
@@ -41,6 +42,7 @@ from dedupe_module import (
     syllabus_task_id,
 )
 from retry_utils import with_retries
+from safe_text import explain_google_auth_failure, is_google_auth_failure, redact_text
 from sheets_module import incoming_from_sources, merge_tracker, normalize_key, sort_by_days_until_due
 from vocab import sheet_status
 
@@ -106,9 +108,18 @@ def _authenticate() -> gspread.Client:
         )
 
     if not GOOGLE_SHEET_ID:
-        raise ValueError("GOOGLE_SHEET_ID must be set in .env or local.env")
+        raise ValueError(
+            "GOOGLE_SHEET_ID must be set in .env or local.env. Run: python main.py --check"
+        )
 
-    return gspread.service_account(filename=str(CREDENTIALS_PATH), scopes=SCOPES)
+    try:
+        return gspread.service_account(filename=str(CREDENTIALS_PATH), scopes=SCOPES)
+    except (OSError, ValueError, json.JSONDecodeError, UnicodeError) as exc:
+        raise GoogleSheetPermissionError(explain_google_auth_failure(exc)) from exc
+    except Exception as exc:
+        if is_google_auth_failure(exc):
+            raise GoogleSheetPermissionError(explain_google_auth_failure(exc)) from exc
+        raise
 
 
 def _open_spreadsheet(client: gspread.Client) -> gspread.Spreadsheet:
@@ -287,9 +298,23 @@ def load_from_google_sheet() -> pd.DataFrame:
     Hydrates Task_ID from column A, Meta sheet, then local state — rebuilding
     local JSON when wiped so identity survives across machines.
     """
-    client = _authenticate()
-    spreadsheet = _open_spreadsheet(client)
-    worksheet = spreadsheet.worksheet(MASTERLIST_SHEET)
+    try:
+        client = _authenticate()
+        spreadsheet = _open_spreadsheet(client)
+        try:
+            worksheet = spreadsheet.worksheet(MASTERLIST_SHEET)
+        except gspread.WorksheetNotFound as exc:
+            raise GoogleSheetPermissionError(
+                f"Worksheet '{MASTERLIST_SHEET}' not found. "
+                "Use the HHS Assignment Tracker template, which has a Masterlist tab."
+            ) from exc
+    except GoogleSheetPermissionError:
+        raise
+    except Exception as exc:
+        if is_google_auth_failure(exc):
+            raise GoogleSheetPermissionError(explain_google_auth_failure(exc)) from exc
+        logger.error("Could not read Google Sheet: %s", redact_text(exc))
+        raise
     all_values = _get_all_values(worksheet)
     meta_map = _load_meta_task_map(spreadsheet)
     state = load_task_state()
@@ -421,7 +446,7 @@ def _write_masterlist_rows(
 ) -> int:
     """
     Write merged data to Masterlist columns A–H.
-    Active rows are ordered soonest-due first; Submitted/Complete sink to the bottom.
+    Active rows are ordered soonest-due first; Submitted and other finished rows sink to the bottom.
     Formula columns (I+) are left untouched.
     """
     if merged_df.empty:
@@ -583,7 +608,9 @@ def push_to_google_sheet(
         logger.error("Google Sheets API error: %s", exc)
         raise
     except Exception as exc:
-        logger.error("Unexpected error pushing to Google Sheets: %s", exc)
+        if is_google_auth_failure(exc):
+            raise GoogleSheetPermissionError(explain_google_auth_failure(exc)) from exc
+        logger.error("Unexpected error pushing to Google Sheets: %s", redact_text(exc))
         raise
 
 

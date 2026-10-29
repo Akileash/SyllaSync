@@ -14,6 +14,7 @@ from config import GEMINI_API_KEY, GEMINI_MODEL, TERM_YEAR
 from course_utils import normalize_course_code
 from date_utils import split_title_and_due
 from retry_utils import with_retries
+from safe_text import redact_text
 
 logger = logging.getLogger(__name__)
 
@@ -57,8 +58,32 @@ Syllabus text:
 
 
 def _extract_pdf_text(pdf_path: Path) -> str:
-    reader = PdfReader(str(pdf_path))
-    pages = [page.extract_text() or "" for page in reader.pages]
+    try:
+        reader = PdfReader(str(pdf_path))
+    except Exception as exc:  # noqa: BLE001 — corrupt / encrypted / locked PDF
+        raise ValueError(
+            f"Could not open {pdf_path.name}. If it is encrypted, export an "
+            f"unlocked copy into syllabi/. If OneDrive is still downloading it, "
+            f"wait and re-run. {redact_text(exc)}"
+        ) from exc
+    if getattr(reader, "is_encrypted", False):
+        try:
+            reader.decrypt("")
+        except Exception as exc:  # noqa: BLE001
+            raise ValueError(
+                f"{pdf_path.name} is encrypted. Export an unlocked PDF into syllabi/."
+            ) from exc
+    pages: list[str] = []
+    for index, page in enumerate(reader.pages, start=1):
+        try:
+            pages.append(page.extract_text() or "")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Skipped unreadable page %d of %s: %s",
+                index,
+                pdf_path.name,
+                redact_text(exc),
+            )
     return "\n".join(pages).strip()
 
 
@@ -234,31 +259,96 @@ def _parse_with_deterministic_parser(pdf_path: Path, text: str) -> list[dict[str
     return None
 
 
-def _parse_gemini_response(raw_text: str) -> list[dict[str, str]]:
-    cleaned = raw_text.strip()
+def _loads_lenient(snippet: str) -> Any:
+    """json.loads, then a second attempt with trailing commas removed."""
+    try:
+        return json.loads(snippet)
+    except json.JSONDecodeError:
+        repaired = re.sub(r",\s*([}\]])", r"\1", snippet)
+        return json.loads(repaired)
+
+
+def _salvage_objects(text: str) -> list[dict[str, Any]]:
+    """Pull complete JSON objects out of a truncated model response."""
+    objects: list[dict[str, Any]] = []
+    for match in re.finditer(r"\{[^{}]*\}", text):
+        try:
+            obj = json.loads(match.group(0))
+        except json.JSONDecodeError:
+            continue
+        if isinstance(obj, dict):
+            objects.append(obj)
+    return objects
+
+
+def parse_model_payload(raw_text: str) -> list[dict[str, str]]:
+    """
+    Turn Gemini text into syllabus rows.
+
+    Accepts fenced JSON, prose around an array, trailing commas, a single
+    object, and truncated output that still contains complete objects.
+    Items that are not objects are skipped.
+    """
+    if not str(raw_text or "").strip():
+        raise ValueError("Gemini returned an empty response")
+
+    cleaned = str(raw_text).strip()
     fence_match = re.search(r"```(?:json)?\s*(.*?)\s*```", cleaned, re.DOTALL)
     if fence_match:
         cleaned = fence_match.group(1).strip()
-    data = json.loads(cleaned)
+
+    data: Any = None
+    start = cleaned.find("[")
+    end = cleaned.rfind("]")
+    if start != -1 and end > start:
+        try:
+            data = _loads_lenient(cleaned[start : end + 1])
+        except json.JSONDecodeError:
+            data = None
+    if data is None and cleaned.startswith("{") and cleaned.endswith("}"):
+        try:
+            data = _loads_lenient(cleaned)
+        except json.JSONDecodeError:
+            data = None
+    if data is None:
+        salvaged = _salvage_objects(cleaned)
+        if not salvaged:
+            raise ValueError(
+                "Gemini response was not a JSON array of assignments. "
+                "The raw response was not logged."
+            )
+        data = salvaged
+
+    if isinstance(data, dict):
+        data = [data]
     if not isinstance(data, list):
         raise ValueError("Gemini response is not a JSON array")
+
     results: list[dict[str, str]] = []
     for item in data:
         if not isinstance(item, dict):
             continue
-        clean_task, clean_due = split_title_and_due(
-            item.get("Task", "Unknown"),
-            item.get("Due Date", "TBD"),
-        )
+        task = item.get("Task") or item.get("task") or item.get("name")
+        if not str(task or "").strip():
+            continue
+        course = item.get("Course") or item.get("course") or "Unknown"
+        due = item.get("Due Date") or item.get("due_date") or item.get("due") or "TBD"
+        clean_task, clean_due = split_title_and_due(task, due)
+        if not str(clean_task or "").strip():
+            continue
         results.append(
             {
                 "Source": "Syllabus",
-                "Course": str(item.get("Course", "Unknown")),
+                "Course": str(course),
                 "Task": clean_task,
                 "Due Date": clean_due or "TBD",
             }
         )
     return results
+
+
+def _parse_gemini_response(raw_text: str) -> list[dict[str, str]]:
+    return parse_model_payload(raw_text)
 
 
 def _build_gemini_client():
@@ -303,13 +393,28 @@ def _parse_single_pdf(pdf_path: Path, client: Any | None) -> list[dict[str, Any]
     try:
         raw = _gemini_generate(client, prompt)
     except Exception as exc:  # noqa: BLE001
-        logger.error("Gemini parse failed for %s: %s", pdf_path.name, exc)
+        logger.error(
+            "Gemini parse failed for %s: %s. "
+            "HTTP 503 / 'high demand' is retried with backoff; if it still fails, "
+            "re-run later. Other PDFs and Canvas rows are unaffected. "
+            "The API key was not logged.",
+            pdf_path.name,
+            redact_text(exc),
+        )
         return []
 
     if not raw:
         logger.warning("Empty Gemini response for %s — skipping.", pdf_path.name)
         return []
-    return _parse_gemini_response(raw)
+    try:
+        return _parse_gemini_response(raw)
+    except (json.JSONDecodeError, ValueError) as exc:
+        logger.error(
+            "Gemini returned malformed JSON for %s: %s. Skipping this PDF only.",
+            pdf_path.name,
+            redact_text(exc),
+        )
+        return []
 
 
 def fetch_syllabus_assignments() -> list[dict[str, Any]]:
@@ -328,9 +433,17 @@ def fetch_syllabus_assignments() -> list[dict[str, Any]]:
             all_assignments.extend(assignments)
             logger.info("Parsed %d assignment(s) from %s.", len(assignments), pdf_path.name)
         except json.JSONDecodeError as exc:
-            logger.error("Invalid JSON from Gemini for %s: %s", pdf_path.name, exc)
+            logger.error(
+                "Invalid JSON from Gemini for %s: %s. Skipping this PDF only.",
+                pdf_path.name,
+                redact_text(exc),
+            )
         except Exception as exc:  # noqa: BLE001
-            logger.error("Failed to parse %s: %s", pdf_path.name, exc)
+            logger.error(
+                "Failed to parse %s: %s. Skipping this PDF only.",
+                pdf_path.name,
+                redact_text(exc),
+            )
 
     logger.info("Total syllabus assignments parsed: %d", len(all_assignments))
     return all_assignments

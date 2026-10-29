@@ -60,7 +60,7 @@ def main() -> None:
         print()
         print("Ready to sync with: python main.py --google")
 
-    except SpreadsheetNotFound as exc:
+    except SpreadsheetNotFound:
         print(
             "Error: Spreadsheet not found.\n"
             "  - Check that GOOGLE_SHEET_ID in .env is correct\n"
