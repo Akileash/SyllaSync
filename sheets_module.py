@@ -86,7 +86,7 @@ COLUMN_ALIGNMENTS = {
     "Is Draft": Alignment(horizontal="center", vertical="center"),
 }
 
-STATUS_OPTIONS = '"Not started,In Progress,Done"'
+STATUS_OPTIONS = '"Not Started,In Progress,Submitted,Graded,Cancelled"'
 PRIORITY_OPTIONS = '"P 1,P 2,P 3"'
 
 
@@ -493,7 +493,12 @@ def _apply_conditional_formatting(ws, header_row: int, data_row_count: int) -> N
     ws.conditional_formatting.add(
         f"A{first_row}:{get_column_letter(len(COLUMNS))}{last_row}",
         FormulaRule(
-            formula=[f'${status_col}{first_row}="Done"'],
+            formula=[
+                f'OR(${status_col}{first_row}="Submitted",'
+                f'${status_col}{first_row}="Graded",'
+                f'${status_col}{first_row}="Cancelled",'
+                f'${status_col}{first_row}="Done")'
+            ],
             fill=done_fill,
             font=done_font,
         ),

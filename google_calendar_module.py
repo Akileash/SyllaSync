@@ -12,6 +12,7 @@ Idempotent upserts with full lifecycle:
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from datetime import datetime, timedelta, timezone
@@ -33,6 +34,7 @@ from dedupe_module import (
     is_droppable_placeholder,
 )
 from retry_utils import with_retries
+from safe_text import explain_google_auth_failure, is_google_auth_failure, redact_text
 from vocab import calendar_color, calendar_summary_prefix, normalize_status
 
 logger = logging.getLogger(__name__)
@@ -70,10 +72,17 @@ def _authenticate():
             "Settings -> Integrate calendar."
         )
 
-    creds = service_account.Credentials.from_service_account_file(
-        str(CREDENTIALS_PATH), scopes=SCOPES
-    )
-    return build("calendar", "v3", credentials=creds, cache_discovery=False)
+    try:
+        creds = service_account.Credentials.from_service_account_file(
+            str(CREDENTIALS_PATH), scopes=SCOPES
+        )
+        return build("calendar", "v3", credentials=creds, cache_discovery=False)
+    except (OSError, ValueError, json.JSONDecodeError, UnicodeError) as exc:
+        raise GoogleCalendarPermissionError(explain_google_auth_failure(exc)) from exc
+    except Exception as exc:
+        if is_google_auth_failure(exc):
+            raise GoogleCalendarPermissionError(explain_google_auth_failure(exc)) from exc
+        raise
 
 
 def _parse_summary(summary: str) -> tuple[str, str]:
@@ -388,9 +397,14 @@ def push_to_google_calendar(
     df: pd.DataFrame,
     *,
     dry_run: bool = False,
+    prune: bool = True,
 ) -> dict[str, int]:
     """
     Create / update / skip Google Calendar events and delete obsolete ones.
+
+    `prune=False` skips every delete. Use it when a source failed so a partial
+    row set cannot remove events that were simply missing from this run.
+    The default remains the existing cleanup behaviour.
 
     Returns counts including deleted obsolete / duplicate events.
     """
@@ -402,6 +416,8 @@ def push_to_google_calendar(
         service = _authenticate()
         calendar_id = GOOGLE_CALENDAR_ID
         existing_list = _get_existing_syllasync_events(service, calendar_id)
+    except (GoogleCalendarPermissionError, FileNotFoundError, ValueError):
+        raise
     except HttpError as exc:
         status = getattr(exc.resp, "status", None)
         if status in (403, 404):
@@ -412,6 +428,10 @@ def push_to_google_calendar(
                 "to your email or calendar ID (not an iCal URL), and enable "
                 "the Google Calendar API in GCP."
             ) from exc
+        raise
+    except Exception as exc:
+        if is_google_auth_failure(exc):
+            raise GoogleCalendarPermissionError(explain_google_auth_failure(exc)) from exc
         raise
 
     by_task_id: dict[str, dict[str, Any]] = {}
@@ -554,9 +574,69 @@ def push_to_google_calendar(
                     "(Make changes to events) and verify GOOGLE_CALENDAR_ID."
                 ) from exc
             counts["failed"] += 1
-            print(f"  ! failed   {summary}: {exc}")
-            logger.error("Failed to sync event '%s': %s", summary, exc)
+            print(f"  ! failed   {summary}: {redact_text(exc)}")
+            logger.error("Failed to sync event '%s': %s", summary, redact_text(exc))
 
+    if not prune:
+        print(
+            "[INFO] Calendar delete step skipped. A source failed or this run is "
+            "partial, so existing events were left in place."
+        )
+        logger.info("Calendar prune skipped (partial run).")
+    else:
+        _prune_stale_events(
+            service,
+            calendar_id,
+            existing_list,
+            active_task_ids,
+            keep_event_ids,
+            seen_fuzzy,
+            by_fuzzy,
+            counts,
+            dry_run=dry_run,
+        )
+
+    print(
+        f"\n[INFO] Calendar: {counts['created']} created, "
+        f"{counts['updated']} updated, {counts['unchanged']} unchanged, "
+        f"{counts['deleted']} deleted "
+        f"({counts['obsolete_deleted']} obsolete)"
+    )
+    if counts["skipped"] or counts["failed"]:
+        print(
+            f"[INFO] Calendar extras - skipped: {counts['skipped']}, "
+            f"failed: {counts['failed']}"
+        )
+    print()
+    logger.info(
+        "Calendar sync: created=%d updated=%d unchanged=%d deleted=%d "
+        "obsolete=%d skipped=%d failed=%d dry_run=%s prune=%s",
+        counts["created"],
+        counts["updated"],
+        counts["unchanged"],
+        counts["deleted"],
+        counts["obsolete_deleted"],
+        counts["skipped"],
+        counts["failed"],
+        dry_run,
+        prune,
+    )
+    return counts
+
+
+def _prune_stale_events(
+    service,
+    calendar_id: str,
+    existing_list: list[dict[str, Any]],
+    active_task_ids: set[str],
+    keep_event_ids: set[str],
+    seen_fuzzy: set[str],
+    by_fuzzy: dict[str, list[dict[str, Any]]],
+    counts: dict[str, int],
+    *,
+    dry_run: bool,
+) -> None:
+    """Delete obsolete and duplicate Sylla Sync events. Unchanged behaviour."""
     # Delete superseded / removed tasks (lifecycle)
     obsolete_ids = compute_obsolete_event_ids(
         existing_list, active_task_ids, keep_event_ids
@@ -625,30 +705,6 @@ def push_to_google_calendar(
                     print(f"  x deleted orphan duplicate {extra['summary']}")
                 counts["deleted"] += 1
             except HttpError as exc:
-                logger.warning("Could not delete duplicate %s: %s", extra["id"], exc)
-
-    print(
-        f"\n[INFO] Calendar: {counts['created']} created, "
-        f"{counts['updated']} updated, {counts['unchanged']} unchanged, "
-        f"{counts['deleted']} deleted "
-        f"({counts['obsolete_deleted']} obsolete)"
-    )
-    if counts["skipped"] or counts["failed"]:
-        print(
-            f"[INFO] Calendar extras - skipped: {counts['skipped']}, "
-            f"failed: {counts['failed']}"
-        )
-    print()
-    logger.info(
-        "Calendar sync: created=%d updated=%d unchanged=%d deleted=%d "
-        "obsolete=%d skipped=%d failed=%d dry_run=%s",
-        counts["created"],
-        counts["updated"],
-        counts["unchanged"],
-        counts["deleted"],
-        counts["obsolete_deleted"],
-        counts["skipped"],
-        counts["failed"],
-        dry_run,
-    )
-    return counts
+                logger.warning(
+                    "Could not delete duplicate %s: %s", extra["id"], redact_text(exc)
+                )

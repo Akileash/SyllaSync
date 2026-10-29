@@ -18,6 +18,7 @@ from config import (
 from course_utils import course_matches_allowed, normalize_course_code, parse_allowed_courses
 from date_utils import apply_lab_monday_due, format_internal_datetime, split_title_and_due
 from retry_utils import with_retries
+from safe_text import redact_text
 from schedule_module import load_schedule
 
 logger = logging.getLogger(__name__)
@@ -27,6 +28,33 @@ OUTPUT_COLUMNS = ("Source", "Course", "Task", "Due Date")
 
 class CanvasFetchError(RuntimeError):
     """Raised when Canvas cannot be reached or credentials are invalid."""
+
+
+def explain_canvas_error(exc: BaseException) -> str:
+    """Actionable Canvas failure text. Never includes the token."""
+    text = redact_text(exc).lower()
+    if any(marker in text for marker in ("401", "invalid access token", "unauthorized")):
+        return (
+            "Canvas rejected CANVAS_TOKEN (unauthorized). The token is missing, "
+            "expired, or revoked. In Canvas open Account → Settings → New Access Token, "
+            "then put the new token in .env or local.env. The token was not logged."
+        )
+    if "403" in text or "forbidden" in text:
+        return (
+            "Canvas refused this request (forbidden). Confirm the token belongs to "
+            "the account that is enrolled in the courses, and that CANVAS_URL is "
+            "your school's Canvas host. The token was not logged."
+        )
+    if any(marker in text for marker in ("timeout", "timed out", "connection", "503", "502")):
+        return (
+            "Canvas could not be reached (network or temporary outage). "
+            f"Details: {redact_text(exc)} "
+            "Check your connection and re-run. Nothing was written."
+        )
+    return (
+        "Canvas request failed. Check CANVAS_URL and CANVAS_TOKEN in .env or local.env. "
+        f"Details: {redact_text(exc)}"
+    )
 
 
 def _format_due_date(due_at: str | None) -> str | None:
@@ -117,7 +145,15 @@ def fetch_canvas_assignments(
         CanvasFetchError: on auth / connectivity / 5xx failures (fail loudly).
     """
     if not CANVAS_URL or not CANVAS_TOKEN:
-        raise CanvasFetchError("CANVAS_URL and CANVAS_TOKEN must be set in .env")
+        raise CanvasFetchError(
+            "CANVAS_URL and CANVAS_TOKEN must be set in .env or local.env. "
+            "Run: python main.py --check"
+        )
+    if not CANVAS_URL.lower().startswith(("http://", "https://")):
+        raise CanvasFetchError(
+            "CANVAS_URL must start with https:// (your school Canvas host). "
+            "The value was not logged."
+        )
 
     lookback = CANVAS_PAST_DUE_DAYS if lookback_days is None else lookback_days
     assignments: list[dict[str, Any]] = []
@@ -128,9 +164,9 @@ def fetch_canvas_assignments(
         canvas = Canvas(CANVAS_URL, CANVAS_TOKEN)
         courses = _list_courses(canvas)
     except CanvasException as exc:
-        raise CanvasFetchError(f"Failed to connect to Canvas: {exc}") from exc
+        raise CanvasFetchError(explain_canvas_error(exc)) from exc
     except Exception as exc:  # network / unexpected
-        raise CanvasFetchError(f"Canvas request failed: {exc}") from exc
+        raise CanvasFetchError(explain_canvas_error(exc)) from exc
 
     for course in courses:
         raw_name = (
@@ -150,7 +186,11 @@ def fetch_canvas_assignments(
         try:
             course_assignments = _list_assignments(course)
         except CanvasException as exc:
-            logger.warning("Skipping course '%s': %s", course_name, exc)
+            logger.warning(
+                "Skipping course '%s' after Canvas error: %s",
+                course_name,
+                explain_canvas_error(exc),
+            )
             continue
 
         for assignment in course_assignments:

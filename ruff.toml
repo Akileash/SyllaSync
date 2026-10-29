@@ -1,0 +1,6 @@
+# Project lint. Line length is not enforced; the existing modules wrap by hand.
+target-version = "py310"
+
+[lint]
+select = ["E", "F"]
+ignore = ["E501"]
