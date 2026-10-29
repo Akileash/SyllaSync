@@ -37,15 +37,15 @@ _STATUS_ALIASES: dict[str, Status] = {
     "started": Status.IN_PROGRESS,
     "submitted": Status.SUBMITTED,
     "turned in": Status.SUBMITTED,
-    "graded": Status.GRADED,
+    # Graded and Done are finished work. The pipeline maps them to Submitted.
+    # "Graded" stays an accepted Sheet label so existing dropdowns still match.
+    "graded": Status.SUBMITTED,
+    "done": Status.SUBMITTED,
     "cancelled": Status.CANCELLED,
     "canceled": Status.CANCELLED,
     "dropped": Status.CANCELLED,
-    # Finished work is Submitted. Never keep a "Complete" status that would
-    # be written back to the Sheet.
     "complete": Status.SUBMITTED,
     "completed": Status.SUBMITTED,
-    "done": Status.SUBMITTED,
 }
 
 # Canonical → Google Sheets / HHS template dropdown
@@ -69,6 +69,8 @@ STATUS_TO_EXCEL: dict[Status, str] = {
     Status.COMPLETE: "Submitted",
 }
 
+# Labels the Sheet dropdown accepts. Graded stays so existing validation
+# does not flag cells the user already typed.
 SHEET_STATUS_LABELS = (
     "Not Started",
     "In Progress",
@@ -76,6 +78,14 @@ SHEET_STATUS_LABELS = (
     "Graded",
     "Cancelled",
 )
+
+_ACCEPTED_SHEET_LABELS: dict[str, str] = {
+    label.lower(): label for label in SHEET_STATUS_LABELS
+}
+
+# Finished work shares one rank. A synced status does not replace a Sheet
+# value at the same rank (the typed label wins, including Graded).
+_FINISHED_STATUSES = {Status.SUBMITTED, Status.GRADED, Status.COMPLETE, Status.CANCELLED}
 
 _PRIORITY_ALIASES: dict[str, Priority] = {
     "": Priority.MEDIUM,
@@ -146,11 +156,52 @@ def _forbid_complete(label: str) -> str:
 
 
 def sheet_status(value: object) -> str:
+    """Pipeline mapping. Graded, Done, and Complete all become Submitted."""
     return _forbid_complete(STATUS_TO_SHEET[normalize_status(value)])
 
 
 def excel_status(value: object) -> str:
     return _forbid_complete(STATUS_TO_EXCEL[normalize_status(value)])
+
+
+def status_rank(value: object) -> int:
+    """Not Started < In Progress < every finished status (those tie)."""
+    status = normalize_status(value)
+    if status in _FINISHED_STATUSES:
+        return 2
+    if status == Status.IN_PROGRESS:
+        return 1
+    return 0
+
+
+def preserve_sheet_label(value: object) -> str:
+    """
+    Keep a label the user typed when the dropdown accepts it.
+
+    Graded is preserved. Complete and Done are mapped to Submitted.
+    """
+    key = str(value or "").strip().lower()
+    if not key:
+        return "Not Started"
+    if key in _ACCEPTED_SHEET_LABELS:
+        return _ACCEPTED_SHEET_LABELS[key]
+    return sheet_status(value)
+
+
+def choose_status(sheet_value: object, synced_value: object) -> str:
+    """
+    Pick the status to keep.
+
+    Equal ranks keep the Sheet label. A higher rank may replace it.
+    The result is never the word Complete.
+    """
+    sheet = str(sheet_value or "").strip()
+    synced = str(synced_value or "").strip()
+    if not sheet:
+        return sheet_status(synced) if synced else "Not Started"
+    if not synced or status_rank(sheet) >= status_rank(synced):
+        return preserve_sheet_label(sheet)
+    return sheet_status(synced)
 
 
 def excel_priority(value: object) -> str:

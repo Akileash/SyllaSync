@@ -1,10 +1,17 @@
 """
 Quick test to verify Google Sheets connectivity for Sylla Sync.
 
+By default this only reads Masterlist cell A1. Pass --write to store
+"Connection Successful!" in that cell.
+
 Usage:
     python test_sheets.py
+    python test_sheets.py --write
 """
 
+from __future__ import annotations
+
+import argparse
 import os
 import sys
 from pathlib import Path
@@ -12,6 +19,8 @@ from pathlib import Path
 import gspread
 from dotenv import load_dotenv
 from gspread.exceptions import APIError, SpreadsheetNotFound
+
+from config import warn_if_tzdata_old
 
 BASE_DIR = Path(__file__).parent
 CREDENTIALS_PATH = BASE_DIR / "credentials.json"
@@ -27,7 +36,21 @@ SCOPES = [
 ]
 
 
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Check that the service account can open the Masterlist tab."
+    )
+    parser.add_argument(
+        "--write",
+        action="store_true",
+        help="Write 'Connection Successful!' into Masterlist cell A1. Omit this to stay read-only.",
+    )
+    return parser.parse_args()
+
+
 def main() -> None:
+    args = parse_args()
+    warn_if_tzdata_old()
     if not GOOGLE_SHEET_ID:
         print(
             "Error: GOOGLE_SHEET_ID is not set.\n"
@@ -51,7 +74,11 @@ def main() -> None:
         )
         spreadsheet = client.open_by_key(GOOGLE_SHEET_ID)
         worksheet = spreadsheet.worksheet("Masterlist")
-        worksheet.update_acell("A1", "Connection Successful!")
+        if args.write:
+            worksheet.update_acell("A1", "Connection Successful!")
+            print("Wrote 'Connection Successful!' to Masterlist A1.")
+        else:
+            print("Read-only check. Pass --write to update Masterlist cell A1.")
 
         print("Connection Successful!")
         print(f"  Sheet title : {spreadsheet.title}")

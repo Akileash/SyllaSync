@@ -138,6 +138,8 @@ def _collapse_by_match_key(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return df.reindex(columns=cols)
 
+    from vocab import choose_status
+
     best: dict[str, dict[str, Any]] = {}
     for _, row in df.iterrows():
         key = fuzzy_match_key(row.get("Course", ""), row.get("Assessment title", ""))
@@ -172,7 +174,12 @@ def _collapse_by_match_key(df: pd.DataFrame) -> pd.DataFrame:
         ).strip():
             existing["Due Date"] = row.get("Due Date", "")
         for col in MANUAL_COLUMNS:
-            if col in df.columns and not str(existing.get(col, "")).strip():
+            if col not in df.columns:
+                continue
+            if col == "Status":
+                existing[col] = choose_status(existing.get(col, ""), row.get(col, ""))
+                continue
+            if not str(existing.get(col, "")).strip():
                 existing[col] = row.get(col, "")
 
     if not best:
@@ -275,9 +282,11 @@ def _merge_tracker(existing: pd.DataFrame, incoming: pd.DataFrame) -> pd.DataFra
     - Near-duplicate titles within the same course are collapsed.
     """
     existing = existing.reindex(columns=COLUMNS).fillna("")
-    incoming = incoming.reindex(
-        columns=[c for c in AUTO_COLUMNS + ["Source"] if c in incoming.columns or c in AUTO_COLUMNS]
-    ).fillna("")
+    incoming_columns = list(AUTO_COLUMNS)
+    for extra in ("Status", "Source"):
+        if extra in incoming.columns and extra not in incoming_columns:
+            incoming_columns.append(extra)
+    incoming = incoming.reindex(columns=incoming_columns).fillna("")
     for col in AUTO_COLUMNS:
         if col not in incoming.columns:
             incoming[col] = ""
@@ -323,6 +332,8 @@ def _merge_tracker(existing: pd.DataFrame, incoming: pd.DataFrame) -> pd.DataFra
             manual_by_task_id[task_id] = manual
             existing_task_id_by_key[key] = task_id
 
+    from vocab import choose_status
+
     merged_rows: list[dict[str, Any]] = []
     incoming_keys: set[str] = set()
     incoming_task_ids: set[str] = set()
@@ -339,11 +350,12 @@ def _merge_tracker(existing: pd.DataFrame, incoming: pd.DataFrame) -> pd.DataFra
         if task_id:
             incoming_task_ids.add(task_id)
 
-        manual = (
+        manual = dict(
             manual_by_task_id.get(task_id)
             or manual_by_key.get(key)
             or {col: "" for col in MANUAL_COLUMNS}
         )
+        manual["Status"] = choose_status(manual.get("Status", ""), row.get("Status", ""))
         title = _prefer_title(
             existing_title_by_key.get(key, ""),
             str(row.get("Assessment title", "")),

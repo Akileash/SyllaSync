@@ -23,6 +23,7 @@ from config import (
     format_config_report,
     is_placeholder,
     validate_env,
+    warn_if_tzdata_old,
 )
 from course_utils import parse_allowed_courses
 from discord_module import send_weekly_digest
@@ -347,6 +348,8 @@ def _in_memory_frame(canvas_data: list, syllabus_data: list):
 def main() -> None:
     configure_stdio()
     args = apply_all_flag(parse_args())
+    if not args.check:
+        warn_if_tzdata_old()
     if args.check:
         issues = validate_env(
             require_discord=args.weekly,

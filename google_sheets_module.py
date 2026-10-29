@@ -44,7 +44,7 @@ from dedupe_module import (
 from retry_utils import with_retries
 from safe_text import explain_google_auth_failure, is_google_auth_failure, redact_text
 from sheets_module import incoming_from_sources, merge_tracker, normalize_key, sort_by_days_until_due
-from vocab import sheet_status
+from vocab import preserve_sheet_label
 
 logger = logging.getLogger(__name__)
 
@@ -166,8 +166,8 @@ def _ensure_meta_sheet(spreadsheet: gspread.Spreadsheet) -> gspread.Worksheet:
 
 
 def _map_status_to_template(status: Any) -> str:
-    """Map Sylla Sync status values to the template's STATUS dropdown."""
-    return sheet_status(status)
+    """Keep a typed Sheet label. Complete/Done still become Submitted."""
+    return preserve_sheet_label(status)
 
 
 def _infer_assignment_type(title: str) -> str:

@@ -7,6 +7,7 @@ import os
 import sys
 from dataclasses import dataclass
 from datetime import date
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -50,6 +51,9 @@ GEMINI_MODEL = (os.getenv("GEMINI_MODEL") or "gemini-3.6-flash").strip()
 
 # Past-due Canvas lookback window (days)
 CANVAS_PAST_DUE_DAYS = _env_int("CANVAS_PAST_DUE_DAYS", 21)
+
+# Alberta stays on UTC-6 from November 2026. Older tzdata still applies DST.
+MIN_TZDATA_VERSION = "2026.5"
 
 # Local timezone for Calendar timed events / Discord windows
 LOCAL_TIMEZONE = (os.getenv("LOCAL_TIMEZONE") or "America/Edmonton").strip()
@@ -106,6 +110,54 @@ class ConfigIssue:
     level: str  # "error" or "warn"
     name: str
     message: str
+
+
+def _version_tuple(text: str) -> tuple[int, ...]:
+    parts: list[int] = []
+    for piece in str(text).split("."):
+        digits = ""
+        for char in piece:
+            if char.isdigit():
+                digits += char
+            else:
+                break
+        if not digits:
+            break
+        parts.append(int(digits))
+    return tuple(parts)
+
+
+def installed_tzdata_version() -> str | None:
+    try:
+        return version("tzdata")
+    except PackageNotFoundError:
+        return None
+
+
+def tzdata_is_old(installed: str | None = None) -> bool:
+    """True when tzdata is missing or older than the Alberta UTC-6 fix."""
+    if installed is None:
+        installed = installed_tzdata_version()
+    if not installed:
+        return True
+    return _version_tuple(installed) < _version_tuple(MIN_TZDATA_VERSION)
+
+
+def tzdata_warning_message() -> str | None:
+    if not tzdata_is_old():
+        return None
+    installed = installed_tzdata_version() or "not installed"
+    return (
+        f"tzdata {installed} is older than {MIN_TZDATA_VERSION}. "
+        "America/Edmonton is wrong after 2026-11-01 because Alberta stays on "
+        "UTC-6. Run: pip install \"tzdata>=2026.5\""
+    )
+
+
+def warn_if_tzdata_old() -> None:
+    message = tzdata_warning_message()
+    if message:
+        print(f"Warning: {message}", file=sys.stderr)
 
 
 def is_placeholder(value: object) -> bool:
@@ -398,6 +450,10 @@ def collect_config_issues(
                 "open, and wait if OneDrive is locking the file.",
             )
         )
+
+    tz_message = tzdata_warning_message()
+    if tz_message:
+        issues.append(ConfigIssue("warn", "tzdata", tz_message))
 
     return issues
 

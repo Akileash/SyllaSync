@@ -386,12 +386,14 @@ def test_build_event_sets_confirmed_status():
 def test_vocab_status_sheet_mapping():
     assert sheet_status("not started") == "Not Started"
     assert sheet_status("submitted") == "Submitted"
-    assert sheet_status("graded") == "Graded"
-    assert sheet_status("cancelled") == "Cancelled"
+    assert sheet_status("graded") == "Submitted"
     assert sheet_status("done") == "Submitted"
+    assert sheet_status("cancelled") == "Cancelled"
     assert sheet_status("complete") == "Submitted"
     assert sheet_status("completed") == "Submitted"
     assert normalize_status("done").value == "SUBMITTED"
+    assert normalize_status("graded").value == "SUBMITTED"
+    assert normalize_status("Graded").value == "SUBMITTED"
     for sample in ("Complete", "completed", "DONE", "Graded", "Submitted", "N/A"):
         assert sheet_status(sample).lower() != "complete"
 
