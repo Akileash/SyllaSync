@@ -12,9 +12,9 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-from safe_text import clean_path
+from .safe_text import clean_path
 
-BASE_DIR = Path(__file__).parent
+BASE_DIR = Path(__file__).resolve().parent.parent
 
 # utf-8-sig strips a BOM so the first key is not "\ufeffCANVAS_URL" on Windows.
 if os.getenv("SYLLASYNC_SKIP_DOTENV", "").strip().lower() not in {"1", "true", "yes"}:
@@ -313,7 +313,7 @@ def collect_config_issues(
                 ConfigIssue(
                     "error",
                     name,
-                    f"{name} is missing. Copy .env.example to .env (or local.env) and set it.",
+                    f"{name} is missing. Copy examples/.env.example to .env (or local.env) and set it.",
                 )
             )
             return
@@ -442,7 +442,7 @@ def collect_config_issues(
             ConfigIssue(
                 "warn",
                 "schedule.json",
-                "schedule.json is missing. Copy schedule.example.json to schedule.json "
+                "schedule.json is missing. Copy examples/schedule.example.json to schedule.json "
                 "and fill in your lecture/lab sections. Without it, section filtering is off.",
             )
         )

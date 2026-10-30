@@ -12,16 +12,16 @@ from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.datavalidation import DataValidation
 
-from config import EXCEL_FILE_PATH
-from course_utils import prefer_course_label
-from vocab import prefer_status
-from date_utils import (
+from .config import BASE_DIR, EXCEL_FILE_PATH
+from .course_utils import prefer_course_label
+from .vocab import prefer_status
+from .date_utils import (
     apply_lab_monday_due,
     has_explicit_time,
     prefer_timed_due,
     split_title_and_due,
 )
-from dedupe_module import (
+from .dedupe_module import (
     TASK_ID_COL,
     dedupe_cross_source,
     fuzzy_match_key,
@@ -212,7 +212,7 @@ def _collapse_by_match_key(df: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(list(best.values()), columns=list(df.columns))
 
 
-IGNORED_ITEMS_PATH = Path(__file__).resolve().parent / "ignored_items.json"
+IGNORED_ITEMS_PATH = BASE_DIR / "ignored_items.json"
 
 
 def load_ignored_task_ids(path: Path | None = None) -> set[str]:
@@ -253,8 +253,8 @@ def _drop_ignored_items(frame: pd.DataFrame) -> pd.DataFrame:
 
 def _restrict_to_allowed_courses(frame: pd.DataFrame) -> pd.DataFrame:
     """Incoming rows outside ALLOWED_COURSES never reach the tracker (existing rows are untouched)."""
-    from config import ALLOWED_COURSES
-    from course_utils import course_matches_allowed, parse_allowed_courses
+    from .config import ALLOWED_COURSES
+    from .course_utils import course_matches_allowed, parse_allowed_courses
 
     allowed = parse_allowed_courses(ALLOWED_COURSES)
     if not allowed or frame.empty or "Course" not in frame.columns:
@@ -320,7 +320,7 @@ def _sort_by_days_until_due(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty or "Due Date" not in df.columns:
         return df.reset_index(drop=True)
 
-    from vocab import Status, normalize_status
+    from .vocab import Status, normalize_status
 
     finished = {
         Status.COMPLETE,
@@ -352,7 +352,7 @@ def _is_droppable_placeholder(title: Any, due: Any = "") -> bool:
     return is_droppable_placeholder(title, due)
 
 
-DUE_OVERRIDES_PATH = Path(__file__).resolve().parent / "due_overrides.json"
+DUE_OVERRIDES_PATH = BASE_DIR / "due_overrides.json"
 
 
 def load_due_overrides(path: Path | None = None) -> dict[str, dict[str, Any]]:
@@ -737,7 +737,7 @@ def update_sheet(
     output_path = Path(EXCEL_FILE_PATH)
     existing = _load_existing_tracker(output_path)
     incoming, stats = _incoming_from_sources(canvas_data, syllabus_data)
-    from dedupe_module import print_dedup_stats
+    from .dedupe_module import print_dedup_stats
 
     print_dedup_stats(stats)
 

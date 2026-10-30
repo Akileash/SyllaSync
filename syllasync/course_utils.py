@@ -6,8 +6,9 @@ import re
 from collections.abc import Callable
 
 # Subject abbreviations that should collapse to a canonical department code.
-# Edge case: Canvas/syllabus may say "CRS 101" while the catalog is "COURSE 101".
+# Edge case: Canvas/syllabus may say "MTH 101" while the catalog is "MATH 101".
 SUBJECT_ALIASES: dict[str, str] = {
+    "CRS": "COURSE",
     "MTH": "MATH",
     "MATHS": "MATH",
     "MATHEMATICS": "MATH",
@@ -42,9 +43,13 @@ COURSE_CODE_PATTERNS: list[tuple[re.Pattern[str], Callable[[re.Match[str]], str]
         re.compile(r"\b(MATH|MTH|MATHS)\s*(\d{3,4})[A-Z]?\b", re.IGNORECASE),
         lambda m: f"MATH {m.group(2)}",
     ),
+    (
+        re.compile(r"\b(COURSE|CRS)\s*(\d{3,4})[A-Z]?\b", re.IGNORECASE),
+        lambda m: f"COURSE {m.group(2)}",
+    ),
     # Generic: CS 101, CHEM 105, STAT 151, ENG 101A, etc.
     (
-        re.compile(r"\b([A-Z]{2,5})\s*(\d{3,4})[A-Z]?\b", re.IGNORECASE),
+        re.compile(r"\b([A-Z]{2,8})\s*(\d{3,4})[A-Z]?\b", re.IGNORECASE),
         lambda m: _format_generic(m.group(1), m.group(2)),
     ),
 ]
@@ -67,8 +72,9 @@ def normalize_course_code(course_name: str) -> str | None:
     Extract a canonical course code like 'COURSE 101' from a Canvas/syllabus title.
 
     Collapses common variants:
-      - CRS 101 / COURSE 101W / COURSE 101 → COURSE 101
-      - COURSE 401 / COURSE401 → COURSE 401
+      - MTH 101 / MATH 101W / Math 101 -> MATH 101
+      - CRS 101 / COURSE 101W -> COURSE 101
+      - MAT E 101 / MATE101 -> MAT E 101
     """
     if not course_name or not str(course_name).strip():
         return None
@@ -137,7 +143,7 @@ def course_matches_allowed(course_name: str, allowed_courses: list[str]) -> bool
 
 
 def compact_course_code(course_name: str) -> str:
-    """Return a filename-safe compact code like COURSE101 or COURSE401."""
+    """Return a filename-safe compact code like COURSE101 or MATE101."""
     normalized = normalize_course_code(course_name)
     if not normalized:
         slug = re.sub(r"[^\w]+", "_", course_name).strip("_")

@@ -4,21 +4,21 @@ from __future__ import annotations
 
 import json
 import logging
-from safe_text import redact_text
+from .safe_text import redact_text
 import re
 from pathlib import Path
 from typing import Any
 
 from PyPDF2 import PdfReader
 
-from config import GEMINI_API_KEY, GEMINI_MODEL, TERM_YEAR
-from course_utils import normalize_course_code
-from date_utils import coerce_to_term_year, split_title_and_due
-from retry_utils import with_retries
+from .config import BASE_DIR, GEMINI_API_KEY, GEMINI_MODEL, TERM_YEAR
+from .course_utils import normalize_course_code
+from .date_utils import coerce_to_term_year, split_title_and_due
+from .retry_utils import with_retries
 
 logger = logging.getLogger(__name__)
 
-SYLLABI_DIR = Path(__file__).parent / "syllabi"
+SYLLABI_DIR = BASE_DIR / "syllabi"
 
 MONTH_MAP = {
     "jan": 1,

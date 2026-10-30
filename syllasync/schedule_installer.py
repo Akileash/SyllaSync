@@ -36,7 +36,7 @@ def validate_time(value: str) -> str:
 
 
 def _default_repo_dir() -> Path:
-    return Path(__file__).resolve().parent
+    return Path(__file__).resolve().parent.parent
 
 
 def _quote_win(path: str | Path) -> str:

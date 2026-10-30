@@ -8,12 +8,12 @@ from datetime import datetime
 import pandas as pd
 import requests
 
-from config import DISCORD_WEBHOOK_URL, LOCAL_TIMEZONE
-from date_utils import due_window_bounds, has_explicit_time, local_tz, parse_due_datetime
-from dedupe_module import is_droppable_placeholder, is_phantom_task
-from retry_utils import with_retries
-from safe_text import redact_text
-from vocab import Status, normalize_priority, normalize_status
+from .config import DISCORD_WEBHOOK_URL, LOCAL_TIMEZONE
+from .date_utils import due_window_bounds, has_explicit_time, local_tz, parse_due_datetime
+from .dedupe_module import is_droppable_placeholder, is_phantom_task
+from .retry_utils import with_retries
+from .safe_text import redact_text
+from .vocab import Status, normalize_priority, normalize_status
 
 logger = logging.getLogger(__name__)
 

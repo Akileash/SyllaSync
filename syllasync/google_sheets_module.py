@@ -22,15 +22,15 @@ import gspread
 import pandas as pd
 from gspread.exceptions import APIError, SpreadsheetNotFound
 
-from config import BASE_DIR, GOOGLE_SHEET_ID
-from date_utils import (
+from .config import BASE_DIR, GOOGLE_SHEET_ID
+from .date_utils import (
     apply_lab_monday_due,
     format_internal_datetime,
     format_sheet_date,
     format_sheet_time,
     split_title_and_due,
 )
-from dedupe_module import (
+from .dedupe_module import (
     TASK_ID_COL,
     ensure_task_id,
     hydrate_state_from_rows,
@@ -41,10 +41,10 @@ from dedupe_module import (
     resolve_persisted_task_id,
     syllabus_task_id,
 )
-from retry_utils import with_retries
-from safe_text import explain_google_auth_failure, is_google_auth_failure, redact_text
-from sheets_module import incoming_from_sources, merge_tracker, normalize_key, sort_by_days_until_due
-from vocab import preserve_sheet_label
+from .retry_utils import with_retries
+from .safe_text import explain_google_auth_failure, is_google_auth_failure, redact_text
+from .sheets_module import incoming_from_sources, merge_tracker, normalize_key, sort_by_days_until_due
+from .vocab import preserve_sheet_label
 
 logger = logging.getLogger(__name__)
 

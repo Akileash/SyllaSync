@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import json
 import logging
-from safe_text import read_json, redact_text
+from .safe_text import read_json, redact_text
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -21,15 +21,15 @@ from typing import Any
 
 import pandas as pd
 
-from config import BASE_DIR
-from date_utils import (
+from .config import BASE_DIR
+from .date_utils import (
     apply_lab_monday_due,
     due_rank,
     has_explicit_time,
     normalize_calendar_date,
     split_title_and_due,
 )
-from course_utils import courses_equivalent, normalize_course_code, prefer_course_label
+from .course_utils import courses_equivalent, normalize_course_code, prefer_course_label
 
 logger = logging.getLogger(__name__)
 
@@ -427,7 +427,7 @@ def _drop_canvas_shell_copies(
     any date, then first seen. Similar-but-different titles (Lab 1 Pre-lab vs
     Lab 1 Report) are not touched.
     """
-    from config import TERM_YEAR
+    from .config import TERM_YEAR
 
     def rank(item: dict[str, Any]) -> tuple[int, int]:
         m = re.match(r"(\d{4})-\d{2}-\d{2}", str(item.get("Due Date") or "").strip())

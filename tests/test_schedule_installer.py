@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from schedule_installer import (
+from syllasync.schedule_installer import (
     build_install_command,
     build_query_command,
     build_uninstall_command,
@@ -95,7 +95,7 @@ def test_build_query_command_argv():
 
 
 def test_install_schedule_non_windows_guard(capsys):
-    with patch("schedule_installer.sys.platform", "linux"):
+    with patch("syllasync.schedule_installer.sys.platform", "linux"):
         code = install_schedule(time="18:00")
     assert code == 1
     captured = capsys.readouterr()
@@ -104,7 +104,7 @@ def test_install_schedule_non_windows_guard(capsys):
 
 
 def test_uninstall_schedule_non_windows_guard(capsys):
-    with patch("schedule_installer.sys.platform", "linux"):
+    with patch("syllasync.schedule_installer.sys.platform", "linux"):
         code = uninstall_schedule()
     assert code == 1
     assert "Windows" in capsys.readouterr().out
@@ -116,8 +116,8 @@ def test_install_schedule_runs_subprocess_on_windows(tmp_path):
     fake.stdout = "SUCCESS: The scheduled task was created."
     fake.stderr = ""
     with (
-        patch("schedule_installer.sys.platform", "win32"),
-        patch("schedule_installer.subprocess.run", return_value=fake) as run,
+        patch("syllasync.schedule_installer.sys.platform", "win32"),
+        patch("syllasync.schedule_installer.subprocess.run", return_value=fake) as run,
     ):
         code = install_schedule(
             time="18:00",
@@ -144,8 +144,8 @@ def test_uninstall_schedule_runs_subprocess_on_windows():
     fake.stdout = "SUCCESS"
     fake.stderr = ""
     with (
-        patch("schedule_installer.sys.platform", "win32"),
-        patch("schedule_installer.subprocess.run", return_value=fake) as run,
+        patch("syllasync.schedule_installer.sys.platform", "win32"),
+        patch("syllasync.schedule_installer.subprocess.run", return_value=fake) as run,
     ):
         code = uninstall_schedule(task_name="SyllaSync Daily")
     assert code == 0
@@ -213,7 +213,7 @@ def test_run_daemon_requires_run_fn():
 
 
 def test_build_tr_uses_wrapper_when_over_261(tmp_path):
-    from schedule_installer import SCHTASKS_TR_MAX, WRAPPER_CMD_NAME, build_tr_command
+    from syllasync.schedule_installer import SCHTASKS_TR_MAX, WRAPPER_CMD_NAME, build_tr_command
 
     python = tmp_path / ("python" + ("x" * 80) + ".exe")
     repo = tmp_path / ("repo" + ("y" * 80))

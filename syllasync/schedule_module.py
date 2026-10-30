@@ -7,8 +7,8 @@ import logging
 from functools import lru_cache
 from typing import Any
 
-from config import BASE_DIR
-from safe_text import read_json
+from .config import BASE_DIR
+from .safe_text import read_json
 
 logger = logging.getLogger(__name__)
 
