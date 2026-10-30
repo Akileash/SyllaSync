@@ -137,9 +137,9 @@ def test_has_explicit_time():
 
 def test_timed_calendar_bounds_not_all_day(monkeypatch):
     monkeypatch.setenv("LOCAL_TIMEZONE", "America/Edmonton")
-    # Reload isn't needed â€” local_tz reads config.LOCAL_TIMEZONE at call time
+    # Reload isn't needed — local_tz reads config.LOCAL_TIMEZONE at call time
     # but config already loaded; calendar_event_bounds uses local_tz() which
-    # reads LOCAL_TIMEZONE from config module â€” patch that.
+    # reads LOCAL_TIMEZONE from config module — patch that.
     import syllasync.date_utils as date_utils
 
     monkeypatch.setattr(date_utils, "LOCAL_TIMEZONE", "America/Edmonton")
@@ -731,7 +731,7 @@ def test_gemini_uses_filename_catalog_course_over_inferred_title():
     from_file = _course_from_filename(filename)
     assert normalize_course_code(from_file) == "COURSE 202"
     assert courses_equivalent("COURSE 202", "Advanced Seminar") is True  # alias
-    # Weekly parser has nothing to match on a lab-quiz schedule â†’ Gemini path.
+    # Weekly parser has nothing to match on a lab-quiz schedule → Gemini path.
     assert parse_weekly_schedule_text("Lab Quiz 1 Sept 15", from_file) == []
 
     raw = json.dumps(
@@ -752,7 +752,7 @@ def test_gemini_uses_filename_catalog_course_over_inferred_title():
     assert len(rows) == 2
     assert all(r["Course"] == "COURSE 202" for r in rows)
     assert "Advanced Seminar" not in {r["Course"] for r in rows}
-    # Do not invent times â€” date-only dues stay date-only.
+    # Do not invent times — date-only dues stay date-only.
     assert rows[0]["Due Date"] == "2026-09-15"
     assert rows[1]["Due Date"] == "2026-09-22"
     assert rows[0]["Task"] == "Lab Quiz 1"
