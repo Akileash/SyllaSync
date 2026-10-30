@@ -1,4 +1,4 @@
-﻿"""Unit tests for Sylla Sync hardening (dedupe, dates, schedule, calendar)."""
+"""Unit tests for Sylla Sync hardening (dedupe, dates, schedule, calendar)."""
 
 from __future__ import annotations
 
@@ -432,13 +432,13 @@ def test_calendar_long_truncated_titles_still_match():
             "id": "long1",
             "summary": "COURSE 501 - Assignment One - 2026 Co-op Expectations",
             "task_id": "canvas_1",
-            "fuzzy_key": "engg 299||assignment#1",
+            "fuzzy_key": "course 501||assignment#1",
             "start_key": "2026-09-16",
         }
     ]
     candidates = _collect_match_candidates(
         task_id="canvas_1",
-        fuzzy="engg 299||assignment#1",
+        fuzzy="course 501||assignment#1",
         summary="COURSE 501 - Assignment One - 2026 Co-op Expectations Agreement",
         by_task_id={},
         by_fuzzy={},
