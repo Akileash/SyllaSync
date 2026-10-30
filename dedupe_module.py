@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import logging
+from safe_text import read_json, redact_text
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -21,7 +22,13 @@ from typing import Any
 import pandas as pd
 
 from config import BASE_DIR
-from date_utils import apply_lab_monday_due, normalize_calendar_date, split_title_and_due
+from date_utils import (
+    apply_lab_monday_due,
+    due_rank,
+    has_explicit_time,
+    normalize_calendar_date,
+    split_title_and_due,
+)
 from course_utils import courses_equivalent, normalize_course_code, prefer_course_label
 
 logger = logging.getLogger(__name__)
@@ -159,6 +166,23 @@ def fuzzy_match_key(course: Any, title: Any) -> str:
     return f"{course_key}||{fuzzy_title_key(title)}"
 
 
+def identity_key(course: Any, title: Any, task_id: Any = None) -> str:
+    """
+    Item identity: a Canvas-backed item is identified by its ``canvas_<id>``
+    Task_ID; anything else (syllabus items) falls back to the fuzzy title key.
+    """
+    tid = str(task_id or "").strip()
+    if tid.startswith("canvas_"):
+        return tid
+    return fuzzy_match_key(course, title)
+
+
+def distinct_canvas_ids(a: Any, b: Any) -> bool:
+    """True when both IDs are Canvas IDs and differ: never the same item."""
+    a, b = str(a or "").strip(), str(b or "").strip()
+    return a.startswith("canvas_") and b.startswith("canvas_") and a != b
+
+
 def canvas_task_id(assignment_id: Any) -> str:
     return f"canvas_{assignment_id}"
 
@@ -215,6 +239,37 @@ def is_droppable_placeholder(title: Any, due_date: Any = "") -> bool:
     return title_norm in CATEGORY_PHANTOMS
 
 
+_EXAM_VARIANT_RE = re.compile(
+    r"\b(?:deferred|supplemental|supp|make-?up|alternate|re-?write)\b", re.IGNORECASE
+)
+
+
+def _prefer_row_due(
+    row: dict[str, Any], candidate_due: Any, candidate_title: Any = None
+) -> None:
+    """Upgrade a kept row's due when the duplicate is more specific.
+
+    Ranking: timed > date-only > empty/TBD. A date-only duplicate never
+    overwrites a timed due. A date-only due fills an empty/TBD row (e.g. an
+    announcement date upgrading an undated syllabus "Midterm"), except across
+    exam variants: an undated Final Exam must not take the date of a
+    Deferred Final that shares its fuzzy key.
+    """
+    current = row.get("Due Date", "")
+    cand_rank = due_rank(candidate_due)
+    cur_rank = due_rank(current)
+    if cand_rank <= cur_rank:
+        return
+    if cand_rank == 1 and candidate_title is not None:
+        row_variant = bool(_EXAM_VARIANT_RE.search(str(row.get("Task", "") or "")))
+        cand_variant = bool(_EXAM_VARIANT_RE.search(str(candidate_title or "")))
+        if row_variant != cand_variant:
+            return
+    row["Due Date"] = str(candidate_due).strip()
+    if row.get("Is Draft"):
+        row["Is Draft"] = is_phantom_task(row.get("Task", ""), row["Due Date"])
+
+
 def dates_within(a: Any, b: Any, hours: int = 48) -> bool:
     """True if both parse and are within ±hours (default 48h)."""
     da = pd.to_datetime(a, errors="coerce")
@@ -228,7 +283,7 @@ def load_task_state() -> dict[str, Any]:
     if not STATE_PATH.exists():
         return {"by_match_key": {}, "aliases": {}}
     try:
-        data = json.loads(STATE_PATH.read_text(encoding="utf-8"))
+        data = read_json(STATE_PATH)
         if not isinstance(data, dict):
             return {"by_match_key": {}, "aliases": {}}
         data.setdefault("by_match_key", {})
@@ -362,6 +417,37 @@ def _titles_fuzzy_equal(a: str, b: str) -> bool:
     return fuzzy_title_key(a) == fuzzy_title_key(b)
 
 
+def _drop_canvas_shell_copies(
+    canvas_data: list[dict[str, Any]], stats: "DedupStats"
+) -> list[dict[str, Any]]:
+    """
+    The same assignment can exist in two Canvas shells (lab shell + a stale
+    lecture-shell copy, e.g. COURSE 301 'Submit (Lab 1 - Results)'). Identical
+    course + normalized title -> keep one: dated in the term year first, then
+    any date, then first seen. Similar-but-different titles (Lab 1 Pre-lab vs
+    Lab 1 Report) are not touched.
+    """
+    from config import TERM_YEAR
+
+    def rank(item: dict[str, Any]) -> tuple[int, int]:
+        m = re.match(r"(\d{4})-\d{2}-\d{2}", str(item.get("Due Date") or "").strip())
+        if not m:
+            return (0, 0)
+        return (1 if int(m.group(1)) >= int(TERM_YEAR) else 0, 1)
+
+    best: dict[tuple[str, str], int] = {}
+    for idx, item in enumerate(canvas_data):
+        course_key = fuzzy_match_key(item.get("Course", ""), "").partition("||")[0]
+        group = (course_key, normalize_title_text(item.get("Task", "")))
+        if group not in best or rank(item) > rank(canvas_data[best[group]]):
+            best[group] = idx
+    keep = set(best.values())
+    for idx in range(len(canvas_data)):
+        if idx not in keep:
+            stats.bump("canvas_shell_copy")
+    return [item for idx, item in enumerate(canvas_data) if idx in keep]
+
+
 def dedupe_cross_source(
     canvas_data: list[dict[str, Any]],
     syllabus_data: list[dict[str, Any]],
@@ -372,6 +458,7 @@ def dedupe_cross_source(
     kept: list[dict[str, Any]] = []
     seen_task_ids: set[str] = set()
     canvas_index: list[dict[str, Any]] = []
+    canvas_data = _drop_canvas_shell_copies(canvas_data, stats)
 
     for item in canvas_data:
         course = item.get("Course", "")
@@ -400,7 +487,7 @@ def dedupe_cross_source(
             stats.bump("canvas_duplicate_task_id")
             continue
         seen_task_ids.add(task_id)
-        canon_course = normalize_course_code(course) or course
+        canon_course = prefer_course_label("", str(course))
         row = {
             "Source": "Canvas",
             "Course": canon_course,
@@ -442,30 +529,59 @@ def dedupe_cross_source(
                     overlap = True
                     break
         if overlap:
+            for c_row in canvas_index:
+                if courses_equivalent(str(c_row["Course"]), str(course)) and _titles_fuzzy_equal(
+                    c_row["Task"], title
+                ):
+                    # Canvas keeps the row, but a date-only canvas due must not
+                    # discard a clock time that only the syllabus row carried.
+                    _prefer_row_due(c_row, due, title)
+                    break
             stats.bump("syllabus_overlaps_canvas")
             continue
 
         task_id = syllabus_task_id(course, title, due)
         task_id = resolve_persisted_task_id(course, title, task_id, state)
         if task_id in seen_task_ids:
+            for row in kept:
+                if row.get(TASK_ID_COL) == task_id:
+                    _prefer_row_due(row, due, title)
+                    break
             stats.bump("syllabus_duplicate_task_id")
             continue
-        if any(fuzzy_match_key(r["Course"], r["Task"]) == fuzzy_match_key(course, title) for r in kept):
+        fuzzy_row = next(
+            (
+                row
+                for row in kept
+                if fuzzy_match_key(row["Course"], row["Task"]) == fuzzy_match_key(course, title)
+            ),
+            None,
+        )
+        if fuzzy_row is not None:
+            _prefer_row_due(fuzzy_row, due, title)
+            fuzzy_row["Course"] = prefer_course_label(
+                str(fuzzy_row.get("Course", "")), str(course)
+            )
+            end_date = str(item.get("End Date", "") or "").strip()
+            if end_date and not str(fuzzy_row.get("End Date", "") or "").strip():
+                fuzzy_row["End Date"] = end_date
             stats.bump("syllabus_fuzzy_duplicate")
             continue
 
         seen_task_ids.add(task_id)
-        kept.append(
-            {
-                "Source": "Syllabus",
-                "Course": normalize_course_code(course) or course,
-                "Task": title,
-                "Due Date": due,
-                "Canvas ID": "",
-                TASK_ID_COL: task_id,
-                "Is Draft": phantom,
-            }
-        )
+        end_date = str(item.get("End Date", "") or "").strip()
+        row = {
+            "Source": "Syllabus",
+            "Course": prefer_course_label("", str(course)),
+            "Task": title,
+            "Due Date": due,
+            "Canvas ID": "",
+            TASK_ID_COL: task_id,
+            "Is Draft": phantom,
+        }
+        if end_date:
+            row["End Date"] = end_date
+        kept.append(row)
 
     stats.kept = len(kept)
     remember_task_ids(
@@ -494,10 +610,11 @@ def records_to_tracker_frame(records: list[dict[str, Any]]) -> pd.DataFrame:
             TASK_ID_COL: r.get(TASK_ID_COL, ""),
             "Source": r.get("Source", ""),
             "Is Draft": bool(r.get("Is Draft", False)),
+            "End Date": str(r.get("End Date", "") or ""),
         }
         for r in records
     ]
-    cols = ["Course", "Assessment title", "Due Date", TASK_ID_COL, "Source", "Is Draft"]
+    cols = ["Course", "Assessment title", "Due Date", TASK_ID_COL, "Source", "Is Draft", "End Date"]
     return pd.DataFrame(rows, columns=cols)
 
 

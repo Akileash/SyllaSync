@@ -5,10 +5,10 @@ from __future__ import annotations
 import json
 import logging
 from functools import lru_cache
-from pathlib import Path
 from typing import Any
 
 from config import BASE_DIR
+from safe_text import read_json
 
 logger = logging.getLogger(__name__)
 
@@ -28,9 +28,16 @@ def load_schedule() -> dict[str, Any]:
         return {"term": "", "sections": []}
 
     try:
-        data = json.loads(SCHEDULE_PATH.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        logger.warning("Could not read schedule.json: %s", exc)
+        data = read_json(SCHEDULE_PATH)
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        logger.warning(
+            "Could not read schedule.json (%s). Section filtering is off until the file is valid UTF-8 JSON.",
+            type(exc).__name__,
+        )
+        return {"term": "", "sections": []}
+
+    if not isinstance(data, dict):
+        logger.warning("schedule.json must be a JSON object. Section filtering is off.")
         return {"term": "", "sections": []}
 
     sections = data.get("sections") or []

@@ -1,229 +1,343 @@
-# Sylla Sync
+# SyllaSync
 
-Sync university assignments from **Canvas** + **syllabus / lab schedule PDFs** into Google Sheets, Google Calendar, Discord, and/or a local Excel dashboard.
+**Canvas assignments and syllabus due dates, synced to Sheets, Calendar, and Discord.**
 
-Vibe coded with Cursor
----
+One Windows CLI that pulls work from Canvas and syllabus PDFs, keeps a Google Sheet tracker current, mirrors due dates into Google Calendar, and can post a Discord digest of what is coming up.
 
-## AI agent prompt (copy everything below this line)
+![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
-```text
-You are setting up and operating Sylla Sync for me. Treat this README as the
-source of truth. Do the work yourself with terminal tools; ask me only when a
-secret, click-through OAuth/share step, or personal timetable detail is required.
+## What it does
 
-============================================================
-MISSION
-============================================================
-Configure Sylla Sync so my Canvas + syllabus assignments reliably appear in:
-  1) Google Sheets Masterlist (HHS Assignment Tracker template)
-  2) Google Calendar (Sylla Sync–managed events only)
-  3) Optional Discord weekly digest
-Never commit secrets. Never invent due dates. Prefer --dry-run before live writes.
+- Pulls assignments from the Canvas API and parses syllabus / schedule PDFs (built-in parsers, with optional Google Gemini for tougher PDFs)
+- Merges everything into a Google Sheet **Masterlist** tracker (columns A–H; template formulas past H are left alone)
+- Upserts due dates as Google Calendar events, including a safe delete path that only removes SyllaSync-owned events after a full successful fetch
+- Optionally posts a Discord webhook digest of work due in the next week
+- Supports `--dry-run` to preview without writing, and `--check` to validate config without calling any service
+- Treats Graded / Done / Complete / Completed as **Submitted** when assigning status, and never writes the word `Complete`
 
-============================================================
-HARD RULES (never violate)
-============================================================
-1. NEVER commit, paste into chat logs, or push:
-   - .env / local.env
-   - credentials.json
-   - schedule.json
-   - .syllasync_task_state.json
-   - anything under syllabi/
-   - token / webhook / API key values
-2. NEVER force-push, amend others’ commits, or skip git hooks unless I ask.
-3. NEVER delete or edit my non–Sylla Sync calendar events (lectures/labs from
-   university ICS). Only touch events Sylla Sync created (description contains
-   "Sylla Sync" or private extendedProperties syllasync=1 / task_id).
-4. NEVER invent Canvas due dates. If Canvas due_at is null, the row may exist
-   on Sheets with a blank due date; Calendar MUST skip it until a real date exists.
-5. Calendar sync must:
-   - ignore cancelled/trashed Google Calendar events
-   - recreate (insert) when an update returns HTTP 410
-   - never match short titles via prefix (HW1 must not match HW10)
-   - set event status to "confirmed" on create/update
-6. Preserve user Status edits on Sheets when merging (Submitted / Complete stay).
-7. Use the project venv if present; otherwise create one and pip install -r
-   requirements.txt.
-8. Prefer absolute paths for this repo when running commands.
+## Data flow
 
-============================================================
-REPO LAYOUT (what matters)
-============================================================
-main.py                  orchestrator (--google --calendar --weekly --all …)
-config.py                loads .env / local.env
-canvas_module.py         live Canvas assignments
-canvas_syllabus_module.py download syllabus/schedule PDFs → syllabi/
-syllabus_module.py       parse local PDFs (Gemini optional)
-dedupe_module.py         Task_ID + cross-source dedupe
-google_sheets_module.py  HHS Masterlist write (cols A–H; leave I+)
-google_calendar_module.py Calendar upsert + obsolete cleanup
-discord_module.py        weekly digest
-schedule_module.py       schedule.json section filter
-sheets_module.py         local Excel fallback
-date_utils.py / vocab.py / course_utils.py / retry_utils.py
-schedule.example.json    template → copy to schedule.json
-.env.example             template → copy to .env
-credentials.json         Google service account (user provides)
-tests/                   run: python -m pytest tests/ -q
-
-============================================================
-SETUP SEQUENCE (do in order; stop and ask me if blocked)
-============================================================
-
-### Phase 0 — Clone / install
-1. Ensure we are in the Sylla Sync repo root.
-2. Create/activate venv and install deps:
-   Windows:  python -m venv venv && venv\Scripts\activate && pip install -r requirements.txt
-   Unix:     python -m venv venv && source venv/bin/activate && pip install -r requirements.txt
-3. If missing:
-   copy .env.example → .env
-   copy schedule.example.json → schedule.json
-
-### Phase 1 — Secrets (.env)
-Fill .env with REAL values (ask me for anything missing):
-
-CANVAS_URL=https://<school>.instructure.com
-CANVAS_TOKEN=<Canvas Account → Settings → New Access Token>
-ALLOWED_COURSES=COURSE 101,COURSE 202,COURSE 401,COURSE 301,COURSE 302,COURSE 501
-LOCAL_TIMEZONE=America/Edmonton
-GOOGLE_SHEET_ID=<id from the Sheet URL>
-GOOGLE_CALENDAR_ID=<my Gmail OR Calendar Settings → Integrate calendar ID>
-DISCORD_WEBHOOK_URL=<optional>
-GEMINI_API_KEY=<optional; PDFs still parse without it>
-# GEMINI_MODEL=gemini-2.5-flash
-
-Notes:
-- ALLOWED_COURSES blank = all active Canvas courses (usually bad).
-- GOOGLE_CALENDAR_ID must be an email/calendar ID, NEVER an iCal/.ics URL.
-
-### Phase 2 — Google Cloud + sharing (I must click; guide me)
-1. Google Cloud Console → project → enable Sheets API + Calendar API.
-2. Create service account → JSON key → save as credentials.json in repo root.
-3. Read client_email from credentials.json (do not print private_key).
-4. Sheets template credit: HHS Student Life @ Purdue
-   Folder: https://drive.google.com/drive/folders/16OVKLNUKoe5slXzq4g3rC4kSgVLTWgYK
-   Or copy: https://docs.google.com/spreadsheets/d/1ALoho_3oHCHn7qsL3HuwOTkCWu2Rz3ZojE3SVflN65c/copy
-5. I make a copy of the tracker → share with client_email as Editor.
-6. Put Sheet ID into GOOGLE_SHEET_ID.
-7. Google Calendar → Settings → Share with specific people → client_email
-   permission: Make changes to events.
-8. Smoke test Sheets: python test_sheets.py
-
-### Phase 3 — schedule.json (section filter)
-Ask me for my timetable. For EACH course record:
-  course, type (LEC|LAB|SEM), section (EB1, EL10, …), days, start, end, location.
-Write schedule.json (gitignored). Purpose: keep MY lab/lecture sections only
-(e.g. COURSE 202 LAB EL05, not every lab section on Canvas).
-
-### Phase 4 — Dry-run then live
-1. python main.py --all --dry-run
-   Expect: PDF downloads into syllabi/, merge stats, no external mutations.
-2. Show me the dry-run summary. If I approve:
-   python main.py --all
-3. Useful variants:
-   python main.py --google --calendar          # Sheets + Calendar cleanup
-   python main.py --course "COURSE 101" --google # one course
-   python main.py --skip-canvas-download …     # reuse syllabi/
-   python main.py --allow-partial              # continue if Canvas fails
-   python main.py --syllabus-only              # local PDFs only
-
-### Phase 5 — Verify
-Sheets Masterlist: rows for my courses with Task_ID in column A.
-Calendar: events titled like "COURSE 101 - HW2" or "[SUBMITTED] COURSE 101 - HW1".
-Discord (if configured): digest skips Completed/Submitted items.
-Run: python -m pytest tests/ -q
-
-============================================================
-BEHAVIORAL CONTRACT (how the pipeline works)
-============================================================
-Sources → dedupe → Sheets and/or Excel → optional Calendar → optional Discord.
-
-Task_ID:
-  Canvas:   canvas_{assignment_id}
-  Syllabus: syllabus_{course}_{title}_{due}
-Canvas wins over syllabus when fuzzy course+title match.
-Aliases: CRS 101 / COURSE 101W → COURSE 101.
-
-Sheets (Masterlist starting row 11):
-  A Task_ID | B Status | C Due Date | D Due Date (calc) | E Time
-  F Class | G Type | H Assignment
-  Columns I+ are template formulas — NEVER overwrite.
-  Titles must not keep embedded "Due date …" text; move into C/D/E.
-  Drop bare placeholders: "Labs", "Assignments", etc.
-
-Calendar:
-  Skip: blank/TBD/unparseable due, draft rows, cancelled status, placeholders.
-  Timed dues → timed event ending at due time (default 60 min span).
-  Date-only → all-day event.
-  Upsert by task_id / fuzzy_key; delete obsolete Sylla Sync events.
-  If event was trashed (410), INSERT a new confirmed event — do not leave gaps.
-  Short homework codes (HW1 vs HW10) match by fingerprint only, not prefix.
-
-Discord:
-  Upcoming window only; skip finished statuses (Complete/Submitted/…).
-
-============================================================
-KNOWN FAILURE MODES → FIX
-============================================================
-| Symptom | Cause | Agent action |
-|---|---|---|
-| On Sheets, missing on Calendar, blank due | Canvas due_at null | Tell me; do not invent date. Re-sync after Canvas/I set a date. |
-| On Sheets with date, missing on Calendar | Trashed event / 410 / bad match | Run python main.py --google --calendar. Code must recreate on 410. |
-| HW1 collided with HW10 / wrong event updated | Prefix match bug | Ensure tests/test_hardening.py calendar HW1≠HW10 tests pass. |
-| Calendar 403 | API off or not shared | Enable Calendar API; share Make changes to events. |
-| Sheets permission error | Not shared Editor | Share client_email as Editor. |
-| Wrong lab section synced | schedule.json wrong | Fix section codes; re-run. |
-| Duplicate Labs / −3 day phantoms | Category placeholders | Re-run --google --calendar; phantoms should drop. |
-| ModuleNotFoundError | Wrong interpreter | Activate venv; pip install -r requirements.txt. |
-| Gemini 404 | Bad model name | Use supported flash model or omit GEMINI_API_KEY. |
-| iCal URL in GOOGLE_CALENDAR_ID | Misconfigured | Replace with email / calendar ID. |
-
-============================================================
-WHEN I REPORT “ON SHEET BUT NOT CALENDAR”
-============================================================
-Diagnose before guessing:
-1. Load Masterlist row(s) for that course/title (raw due + status + Task_ID).
-2. Check whether Due Date parses; if empty → explain Canvas/sheet gap.
-3. List Sylla Sync calendar events (include showDeleted if needed).
-4. If status=cancelled for that task_id → recreate via calendar sync (fixed path).
-5. Re-run python main.py --google --calendar and confirm event is confirmed.
-6. Do not claim “no due date” if columns C/D show a date — re-read raw cells.
-
-============================================================
-DONE CRITERIA
-============================================================
-- [ ] venv + requirements installed
-- [ ] .env filled (no placeholders)
-- [ ] credentials.json present; Sheet + Calendar shared with service account
-- [ ] schedule.json has my lecture/lab section numbers
-- [ ] pytest tests/ passes
-- [ ] dry-run then live --all succeeded
-- [ ] git status clean of secrets; secrets remain gitignored
+```mermaid
+flowchart LR
+  Canvas[Canvas API] --> Merge[Merge and dedupe]
+  PDFs[Syllabus PDFs] --> Parse[PDF parsers]
+  Parse --> Merge
+  Gemini[Gemini optional] -.-> Parse
+  Merge --> Sheet[Google Sheet Masterlist]
+  Sheet --> Cal[Google Calendar]
+  Sheet --> Discord[Discord digest]
 ```
 
----
+## Quick Start
 
-## Human quick start (same flow, shorter)
+Windows PowerShell, from the folder you cloned:
 
-1. `pip install -r requirements.txt` (in a venv)
-2. Copy `.env.example` → `.env` and `schedule.example.json` → `schedule.json`
-3. Add Canvas token + Google IDs; drop `credentials.json` in the repo root
-4. Share Sheet (Editor) + Calendar (**Make changes to events**) with the service account email
-5. Fill `schedule.json` with **your** LEC/LAB section codes
-6. `python main.py --all --dry-run` then `python main.py --all`
+1. **Create a venv and install deps**
 
-| Command | Purpose |
-|---|---|
-| `python main.py --all` | Sheets + Calendar + Discord |
-| `python main.py --google --calendar` | Sheets + Calendar cleanup |
-| `python main.py --course "COURSE 101" --google` | One course |
-| `python main.py --skip-canvas-download --google` | Reuse `syllabi/` |
-| `python -m pytest tests/ -q` | Regression tests |
+   ```powershell
+   py -3 -m venv venv
+   .\venv\Scripts\Activate.ps1
+   python -m pip install --upgrade pip
+   pip install -r requirements.txt
+   ```
 
----
+2. **Copy the example env and schedule files**
 
-## Credits
+   ```powershell
+   Copy-Item .env.example .env
+   Copy-Item schedule.example.json schedule.json
+   ```
 
-Google Sheets assignment tracker template by **HHS Student Life @ Purdue**:  
-https://drive.google.com/drive/folders/16OVKLNUKoe5slXzq4g3rC4kSgVLTWgYK
+   Edit `.env` with your tokens and IDs (UTF-8). Fill in your lecture/lab sections in `schedule.json`.
+
+3. **Add Google credentials**  
+   Download a service-account JSON key from Google Cloud and save it as `credentials.json` in the project folder. Share your Sheet and Calendar with the service account `client_email` (see [Credentials](#credentials)).
+
+4. **Validate config (no network calls, no secret printing)**
+
+   ```powershell
+   python main.py --check
+   ```
+
+5. **Preview, then run the full sync**
+
+   ```powershell
+   python main.py --all --dry-run
+   python main.py --all
+   ```
+
+6. **Run it every day (optional)**
+
+   ```powershell
+   python main.py --install-schedule --time 18:00
+   ```
+
+   See [Daily run with Task Scheduler](#daily-run-with-task-scheduler).
+
+## Credentials
+
+Placeholders only — never commit real tokens or keys.
+
+### Canvas API token
+
+1. In Canvas: **Account → Settings → Approved Integrations → New Access Token**.
+2. Set `CANVAS_URL` to your school host (for example `https://your-university.instructure.com`).
+3. Set `CANVAS_TOKEN` to the token value.
+
+### Google Cloud (Sheets + Calendar)
+
+SyllaSync uses a **service account** JSON key. It does not open a browser OAuth flow.
+
+1. Create or select a project in [Google Cloud Console](https://console.cloud.google.com/).
+2. Enable **Google Sheets API** and **Google Calendar API**.
+3. **APIs & Services → Credentials → Create credentials → Service account**. Finish the wizard (no special project roles required).
+4. Open the service account → **Keys → Add key → JSON**. Save the file as `credentials.json` in this folder.
+5. Copy only the `client_email` from that JSON. Share the Sheet with that email as **Editor**, and share the Calendar with **Make changes to events**.
+6. Set `GOOGLE_SHEET_ID` to the ID between `/d/` and `/edit` in the Sheet URL.
+7. Set `GOOGLE_CALENDAR_ID` to the calendar owner email or the ID under **Integrate calendar** — not an iCal / `.ics` URL.
+
+`credentials.json.example` shows the expected shape with placeholders.
+
+### Discord webhook
+
+1. Channel settings → **Integrations → Webhooks → New Webhook**.
+2. Paste the URL into `DISCORD_WEBHOOK_URL`.
+
+### Gemini API key (optional)
+
+1. Create a key in [Google AI Studio](https://aistudio.google.com/apikey).
+2. Set `GEMINI_API_KEY` in `.env`. Leave unset to use only the built-in PDF parsers.
+3. Optional: `GEMINI_MODEL` (default `gemini-3.6-flash`).
+
+## Config reference
+
+Values load from `.env` or `local.env` (UTF-8, BOM and CRLF accepted). `local.env` overrides `.env`.
+
+| Variable | Required | Purpose |
+| --- | --- | --- |
+| `CANVAS_URL` | Yes (except `--syllabus-only`) | Canvas host URL |
+| `CANVAS_TOKEN` | Yes (except `--syllabus-only`) | Canvas personal access token |
+| `GOOGLE_SHEET_ID` | For `--google` / `--all` | Spreadsheet ID from the URL |
+| `GOOGLE_CALENDAR_ID` | For `--calendar` / `--all` | Email or calendar ID (not iCal) |
+| `DISCORD_WEBHOOK_URL` | For `--weekly` / `--all` | Discord webhook URL |
+| `GEMINI_API_KEY` | No | Enables Gemini for hard-to-parse PDFs |
+| `GEMINI_MODEL` | No | Defaults to `gemini-3.6-flash` |
+| `ALLOWED_COURSES` | No | Comma-separated course codes; blank = all active |
+| `LOCAL_TIMEZONE` | No | IANA zone; default `America/Edmonton` |
+| `TERM_YEAR` | No | Four-digit year; default = current calendar year |
+| `CANVAS_PAST_DUE_DAYS` | No | Past-due lookback in days; default `21` |
+| `EXCEL_FILE_PATH` | No | Local workbook path; default `assignments.xlsx` |
+
+Also keep `credentials.json` and `schedule.json` in the project folder (both gitignored when filled in).
+
+## Optional local JSON files
+
+These files may sit next to the project for fine-tuning what gets synced. They are gitignored when present; shapes below are examples only.
+
+### `due_overrides.json`
+
+Pin an exact due date/time for a specific item when Canvas or a syllabus is wrong or vague. Match by course and title (fuzzy-keyed the same way as the tracker). Optional `end` sets a calendar end time:
+
+```json
+{
+  "overrides": [
+    {
+      "course": "PHYS 100",
+      "title": "Midterm Review Quiz",
+      "due": "2026-12-01 17:00",
+      "end": "2026-12-01 18:00"
+    },
+    {
+      "course": "CHEM 101",
+      "title": "Lab Report 2",
+      "due": "2026-11-15 23:59"
+    }
+  ]
+}
+```
+
+Copy `due_overrides.example.json` to `due_overrides.json` and edit.
+
+### `ignored_items.json`
+
+Hide items by Sylla Sync `task_id` (for example a Canvas id like `canvas_1001`) so they are not re-added from sources:
+
+```json
+{
+  "ignored": [
+    { "task_id": "canvas_1001" },
+    { "task_id": "syllabus_phys_100_attendance_check_in" }
+  ]
+}
+```
+
+Copy `ignored_items.example.json` to `ignored_items.json` and edit.
+
+## Status handling
+
+Sheet / Excel statuses used by the pipeline:
+
+| Label | Meaning |
+| --- | --- |
+| Not Started | Default open work |
+| In Progress | Started |
+| Submitted | Finished (canonical write for completed work) |
+| Graded | Accepted on the Sheet dropdown; kept if you typed it |
+| Cancelled | Dropped / cancelled |
+
+When the pipeline **assigns** a status, `Graded`, `Done`, `Complete`, and `Completed` all map to **Submitted**. The write path never emits the word `Complete`. If the Sheet already has a finished label at the same rank (including typed `Graded`), that cell wins over a synced value. Submitted calendar events use the title prefix `[SUBMITTED] `.
+
+## Commands
+
+Run from the project folder with the venv activated.
+
+| Flag / command | Behavior |
+| --- | --- |
+| `python main.py --check` | Validate config; alias `--validate`. Exit 1 if required items are missing or still placeholders |
+| `python main.py --check --all` | Same check, requiring Sheet, Calendar, and Discord settings |
+| `python main.py --all` | Sheet + Calendar + Discord |
+| `python main.py --all --dry-run` | Full pipeline preview; no writes or deletes |
+| `python main.py --google` | Google Sheet only |
+| `python main.py --google --calendar` | Sheet and Calendar |
+| `python main.py --calendar` | Calendar only (from local Excel merge) |
+| `python main.py --weekly` | Discord digest only (from local Excel merge) |
+| `python main.py --course "CODE 101"` | Limit Canvas syllabus download to a matching course |
+| `python main.py --skip-canvas-download` | Parse PDFs already in `syllabi/` without downloading |
+| `python main.py --syllabus-only` | Skip Canvas fetch; implies `--allow-partial` |
+| `python main.py --allow-partial` | Continue after a Canvas failure; Calendar deletes stay off |
+| `python main.py --install-schedule [--time HH:MM] [--task-name NAME]` | **New.** Register a daily Windows Task Scheduler job that runs `--all` (default 18:00, `SyllaSync Daily`) |
+| `python main.py --uninstall-schedule [--task-name NAME]` | **New.** Remove that scheduled job |
+| `python main.py --daemon [--time HH:MM]` | **New.** Stay running in a terminal and run `--all` once a day |
+| `python main.py` | Local Excel dashboard only |
+| `python test_sheets.py` | Read-only Masterlist probe |
+| `python test_sheets.py --write` | Same probe, then writes a connection marker into A1 |
+| `python -m pytest tests/ -q` | Run the test suite |
+
+`--dry-run` may still contact services when credentials look real so the preview can show would-be creates/updates; it never mutates them. `--check` never contacts them.
+
+On a normal run, a Canvas failure stops before writes so existing rows and events stay put. With `--allow-partial`, later stages can continue from remaining data, but Calendar deletes remain disabled after a partial fetch.
+
+## Daily run with Task Scheduler
+
+Sylla Sync can register a daily job with Windows Task Scheduler so the full
+pipeline (`main.py --all`) runs at a time you choose. Output is appended to
+`logs\daily_sync.log` under the project folder.
+
+### Install
+
+From an activated virtual environment in the project folder:
+
+```bat
+python main.py --install-schedule --time 18:00
+```
+
+Optional flags:
+
+- `--time HH:MM` — 24-hour clock, default `18:00`
+- `--task-name "SyllaSync Daily"` — name shown in Task Scheduler
+
+The installer creates a daily task that changes into the project directory,
+runs `python main.py --all`, and appends stdout and stderr to
+`logs\daily_sync.log`. Paths with spaces are quoted automatically.
+
+### Verify
+
+1. Open **Task Scheduler** (`taskschd.msc`).
+2. Find the task named **SyllaSync Daily** (or the name you passed).
+3. Confirm the trigger time and that the action points at your venv Python and
+   `main.py`.
+
+Or from a command prompt:
+
+```bat
+schtasks /Query /TN "SyllaSync Daily" /V /FO LIST
+```
+
+After a scheduled run, check `logs\daily_sync.log`.
+
+If the generated Task Scheduler `/TR` string would exceed Windows' 261-character limit (long install paths), Sylla Sync writes a short `syllasync_daily.cmd` wrapper in the project folder and points the task at that file instead. The wrapper is gitignored.
+
+### Uninstall
+
+```bat
+python main.py --uninstall-schedule
+```
+
+### Keep-alive alternative (`--daemon`)
+
+If you prefer not to use Task Scheduler (or you are on another OS), leave a
+terminal open with:
+
+```bat
+python main.py --daemon --time 18:00
+```
+
+The process sleeps until the next matching local time, runs the same `--all`
+pipeline, logs failures, and repeats. Close the terminal (or stop the process)
+to end it.
+
+### Notes
+
+- The default Task Scheduler registration runs in the context of the logged-on
+  user. The task typically runs only while that user is signed in, unless you
+  later edit the task and set a different user (`/RU`) and password options in
+  Task Scheduler.
+- Create or activate the project virtual environment before installing so the
+  stored Python path points at the interpreter that has the dependencies.
+- `--install-schedule` and `--uninstall-schedule` refuse to run on non-Windows
+  systems; use `--daemon` there instead.
+
+### Manual setup (alternative)
+
+#### Task Scheduler GUI
+
+
+1. Open **Task Scheduler** → **Create Basic Task**.
+2. Name it (for example `SyllaSync daily`).
+3. Trigger: **Daily**, pick a time.
+4. Action: **Start a program**.
+5. Program/script: full path to the venv Python, for example  
+   `C:\Users\YourName\Projects\SyllaSync\venv\Scripts\python.exe`
+6. Add arguments: `main.py --all`
+7. Start in: the project folder, for example  
+   `C:\Users\YourName\Projects\SyllaSync`
+8. Finish, then open the task → **Settings** and allow run on battery / wake as you prefer.
+
+#### Manual `schtasks` command
+
+```powershell
+schtasks /Create /TN "SyllaSync daily" /SC DAILY /ST 07:30 /TR "C:\Users\YourName\Projects\SyllaSync\venv\Scripts\python.exe main.py --all" /RL LIMITED
+```
+
+Point `/TR` at your real venv `python.exe`, and run the create command from (or ensure the task starts in) the project directory so `.env` and `credentials.json` resolve correctly. Adjust the start time as needed.
+
+## Troubleshooting / FAQ
+
+| Symptom | What to try |
+| --- | --- |
+| `UnicodeEncodeError` / cp1252 console crashes | SyllaSync switches the console to UTF-8 on startup. Keep source and `.env` as UTF-8. Prefer Windows Terminal. |
+| First `.env` key ignored or odd parsing | Save `.env` as UTF-8. A UTF-8 BOM and CRLF are accepted; re-save if an older editor left a bad encoding. |
+| Gemini 503 / “high demand” / quota | Wait and re-run. That PDF is skipped after retries; Canvas and other PDFs still sync. Or unset `GEMINI_API_KEY` and rely on built-in parsers. |
+| Canvas 401 / token rejected | Create a new access token under Canvas Account → Settings. Confirm `CANVAS_URL` is your school host. |
+| Sheets 403 / spreadsheet not found | Share the Sheet with the service account `client_email` as Editor. Confirm `GOOGLE_SHEET_ID` and that the tab is named `Masterlist`. |
+| Wrong times after 1 Nov 2026 (`America/Edmonton`) | Alberta stays on UTC−6. Install current tzdata: `pip install "tzdata>=2026.5"`. Older packages still shift the zone incorrectly. |
+| Calendar deletes skipped after a partial fetch | Expected. Deletes run only after a full Canvas fetch and a healthy Sheet read. Use a successful full run, or pass `--allow-partial` knowing deletes stay off. |
+| `ModuleNotFoundError` | Activate `.\venv\Scripts\Activate.ps1` and `pip install -r requirements.txt`. |
+| Calendar permission errors | Share the calendar as **Make changes to events**. `GOOGLE_CALENDAR_ID` must be an email or calendar ID, not an iCal link. |
+
+## Contributing
+
+```powershell
+py -3 -m venv venv
+.\venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+python -m pytest tests/ -q
+ruff check .
+```
+
+Lint config lives in `ruff.toml` (pycodestyle + pyflakes; line length not enforced). Prefer small, focused PRs with tests for status, config, and sync edge cases.
+
+## License
+
+Released under the [MIT License](LICENSE). Copyright (c) 2026 Akileash Saravanan.

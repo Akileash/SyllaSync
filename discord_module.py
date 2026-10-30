@@ -12,6 +12,7 @@ from config import DISCORD_WEBHOOK_URL, LOCAL_TIMEZONE
 from date_utils import due_window_bounds, has_explicit_time, local_tz, parse_due_datetime
 from dedupe_module import is_droppable_placeholder, is_phantom_task
 from retry_utils import with_retries
+from safe_text import redact_text
 from vocab import Status, normalize_priority, normalize_status
 
 logger = logging.getLogger(__name__)
@@ -175,7 +176,15 @@ def send_weekly_digest(df: pd.DataFrame, *, dry_run: bool = False) -> None:
         requests.HTTPError: If the webhook request fails.
     """
     if not DISCORD_WEBHOOK_URL:
-        raise ValueError("DISCORD_WEBHOOK_URL must be set in .env")
+        raise ValueError(
+            "DISCORD_WEBHOOK_URL must be set in .env or local.env. "
+            "Run: python main.py --check"
+        )
+    if "/api/webhooks/" not in DISCORD_WEBHOOK_URL.lower():
+        raise ValueError(
+            "DISCORD_WEBHOOK_URL does not look like a Discord webhook URL. "
+            "The value was not logged."
+        )
 
     upcoming = _filter_upcoming(df)
     embed = _build_embed(upcoming)
@@ -199,5 +208,23 @@ def send_weekly_digest(df: pd.DataFrame, *, dry_run: bool = False) -> None:
             print(f"        • {row['Course']}: {row[title_col]} ({row['Due Date']})")
         return
 
-    _post_webhook(DISCORD_WEBHOOK_URL, payload)
+    try:
+        _post_webhook(DISCORD_WEBHOOK_URL, payload)
+    except requests.HTTPError as exc:
+        status = getattr(getattr(exc, "response", None), "status_code", None)
+        if status in {401, 404}:
+            raise ValueError(
+                "Discord rejected the webhook (deleted, regenerated, or mistyped). "
+                "Create a new webhook in the channel settings and update "
+                "DISCORD_WEBHOOK_URL. The URL was not logged."
+            ) from exc
+        raise ValueError(
+            f"Discord webhook failed (HTTP {status or 'error'}). "
+            f"{redact_text(exc)} The webhook URL was not logged."
+        ) from exc
+    except requests.RequestException as exc:
+        raise ValueError(
+            "Could not reach Discord. Check your network and re-run. "
+            f"{redact_text(exc)}"
+        ) from exc
     logger.info("Discord digest sent successfully.")

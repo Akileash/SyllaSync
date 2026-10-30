@@ -18,6 +18,11 @@ SUBJECT_ALIASES: dict[str, str] = {
     "ENGINEERING": "ENGG",
 }
 
+# Descriptive course titles (e.g. an old Gemini course label) -> catalog code.
+COURSE_NAME_ALIASES: dict[str, str] = {
+    "advanced seminar": "COURSE 202",
+}
+
 # Prefer specific faculty patterns, then a generic alphanumeric course code.
 # Number group allows an optional trailing letter (201W) which we strip later.
 COURSE_CODE_PATTERNS: list[tuple[re.Pattern[str], Callable[[re.Match[str]], str]]] = [
@@ -69,6 +74,9 @@ def normalize_course_code(course_name: str) -> str | None:
         return None
 
     text = re.sub(r"\s+", " ", str(course_name).strip())
+    alias = COURSE_NAME_ALIASES.get(text.lower())
+    if alias:
+        return alias
     for pattern, formatter in COURSE_CODE_PATTERNS:
         match = pattern.search(text)
         if match:

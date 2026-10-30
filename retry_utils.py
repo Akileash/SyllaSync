@@ -34,17 +34,46 @@ def _status_code(exc: BaseException) -> int | None:
 
 def is_retryable(exc: BaseException) -> bool:
     code = _status_code(exc)
+    # Auth and not-found failures will not succeed on retry.
+    if code in {400, 401, 403, 404}:
+        return False
     if code in RETRYABLE_STATUS:
         return True
     name = type(exc).__name__.lower()
     text = str(exc).lower()
+    if any(
+        marker in text
+        for marker in (
+            "invalid api key",
+            "api key not valid",
+            "api_key_invalid",
+            "unauthorized",
+            "permission denied",
+            "invalid access token",
+        )
+    ):
+        return False
     if "timeout" in name or "timed out" in text:
         return True
     if "connection" in name or "temporarily" in text:
         return True
     if "429" in text or "rate limit" in text or "quota" in text:
         return True
-    if any(s in text for s in ("500", "502", "503", "504")):
+    # Gemini often returns 503 with "high demand" / UNAVAILABLE and no status attr.
+    if any(
+        marker in text
+        for marker in (
+            "500",
+            "502",
+            "503",
+            "504",
+            "high demand",
+            "unavailable",
+            "overloaded",
+            "resource exhausted",
+            "resource_exhausted",
+        )
+    ):
         return True
     return False
 

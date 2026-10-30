@@ -28,11 +28,13 @@ from date_utils import apply_lab_monday_due, calendar_event_bounds, split_title_
 from dedupe_module import (
     TASK_ID_COL,
     ensure_task_id,
+    distinct_canvas_ids,
     fuzzy_match_key,
     fuzzy_title_key,
     is_droppable_placeholder,
 )
 from retry_utils import with_retries
+from safe_text import explain_google_auth_failure, is_google_auth_failure, redact_text
 from vocab import calendar_color, calendar_summary_prefix, normalize_status
 
 logger = logging.getLogger(__name__)
@@ -125,13 +127,20 @@ def _build_event(record: dict[str, Any]) -> dict[str, Any] | None:
     title = str(record.get(title_col, "") or "").strip()
     course = str(record.get("Course", "") or "").strip()
     due_raw = record.get("Due Date", "")
+    end_raw = record.get("End Date", "") or record.get("Event End", "")
+    source = record.get("Source", "")
     title, due_raw = split_title_and_due(title, due_raw)
     due_raw = apply_lab_monday_due(course, title, due_raw)
     # Never create events for bare "Labs" / "Assignments" placeholders
     if is_droppable_placeholder(title, due_raw):
         return None
 
-    bounds = calendar_event_bounds(due_raw)
+    bounds = calendar_event_bounds(
+        due_raw,
+        title=title,
+        source=source,
+        end_value=end_raw,
+    )
     if not bounds or not title:
         return None
 
@@ -316,6 +325,10 @@ def _collect_match_candidates(
     # Deduplicate by event id
     by_id: dict[str, dict[str, Any]] = {}
     for c in candidates:
+        # A different Canvas assignment is never the same event (e.g. Lab 1
+        # Pre-lab vs Lab 1 Report share a fuzzy title key).
+        if distinct_canvas_ids(c.get("task_id"), task_id):
+            continue
         by_id[c["id"]] = c
     return list(by_id.values())
 
@@ -388,9 +401,14 @@ def push_to_google_calendar(
     df: pd.DataFrame,
     *,
     dry_run: bool = False,
+    prune: bool = True,
 ) -> dict[str, int]:
     """
     Create / update / skip Google Calendar events and delete obsolete ones.
+
+    prune=False skips every delete. Use it when a source failed so a partial
+    row set cannot remove events that were simply missing from this run.
+    The default remains the existing cleanup behaviour.
 
     Returns counts including deleted obsolete / duplicate events.
     """
@@ -453,7 +471,8 @@ def push_to_google_calendar(
         fuzzy = event["extendedProperties"]["private"]["fuzzy_key"]
         active_task_ids.add(task_id)
 
-        if task_id in seen_task_ids or fuzzy in seen_fuzzy:
+        is_canvas = str(task_id).startswith("canvas_")
+        if task_id in seen_task_ids or (not is_canvas and fuzzy in seen_fuzzy):
             counts["skipped"] += 1
             continue
         seen_task_ids.add(task_id)
@@ -479,6 +498,8 @@ def push_to_google_calendar(
             if match:
                 for extra in candidates:
                     if extra["id"] == match["id"]:
+                        continue
+                    if not prune:
                         continue
                     if dry_run:
                         print(f"  x [dry-run] delete duplicate {extra['summary']}")
@@ -555,77 +576,84 @@ def push_to_google_calendar(
                 ) from exc
             counts["failed"] += 1
             print(f"  ! failed   {summary}: {exc}")
-            logger.error("Failed to sync event '%s': %s", summary, exc)
+            logger.error("Failed to sync event '%s': %s", summary, redact_text(exc))
 
-    # Delete superseded / removed tasks (lifecycle)
-    obsolete_ids = compute_obsolete_event_ids(
-        existing_list, active_task_ids, keep_event_ids
-    )
-    for eid in obsolete_ids:
-        try:
-            summary = next(
-                (m["summary"] for m in existing_list if m["id"] == eid), eid
-            )
-            if dry_run:
-                print(f"  x [dry-run] delete obsolete {summary}")
-            else:
-                _delete_event(service, calendar_id, eid)
-                print(f"  x deleted obsolete {summary}")
-            counts["obsolete_deleted"] += 1
-            counts["deleted"] += 1
-        except HttpError as exc:
-            logger.warning("Could not delete obsolete event %s: %s", eid, exc)
-
-    # Near-duplicate sweep: same course + title fingerprint left outside keep set
-    kept_fingerprints: set[tuple[str, str]] = set()
-    for meta in existing_list:
-        if meta["id"] in keep_event_ids:
-            kept_fingerprints.add(
-                (
-                    _course_key_from_summary(meta.get("summary") or ""),
-                    _title_fingerprint(meta.get("summary") or ""),
-                )
-            )
-    for meta in existing_list:
-        eid = meta["id"]
-        if eid in keep_event_ids:
-            continue
-        fp = (
-            _course_key_from_summary(meta.get("summary") or ""),
-            _title_fingerprint(meta.get("summary") or ""),
+    if not prune:
+        print(
+            "[INFO] Calendar delete step skipped. A source failed or this run is "
+            "partial, so existing events were left in place."
         )
-        if not fp[0] or not fp[1] or fp not in kept_fingerprints:
-            continue
-        try:
-            if dry_run:
-                print(f"  x [dry-run] delete near-duplicate {meta['summary']}")
-            else:
-                _delete_event(service, calendar_id, eid)
-                print(f"  x deleted near-duplicate {meta['summary']}")
-            counts["deleted"] += 1
-            keep_event_ids.add(eid)  # prevent double-delete below
-        except HttpError as exc:
-            logger.warning("Could not delete near-duplicate %s: %s", eid, exc)
+        logger.info("Calendar prune skipped (partial run).")
+    else:
+        # Delete superseded / removed tasks (lifecycle)
+        obsolete_ids = compute_obsolete_event_ids(
+            existing_list, active_task_ids, keep_event_ids
+        )
+        for eid in obsolete_ids:
+            try:
+                summary = next(
+                    (m["summary"] for m in existing_list if m["id"] == eid), eid
+                )
+                if dry_run:
+                    print(f"  x [dry-run] delete obsolete {summary}")
+                else:
+                    _delete_event(service, calendar_id, eid)
+                    print(f"  x deleted obsolete {summary}")
+                counts["obsolete_deleted"] += 1
+                counts["deleted"] += 1
+            except HttpError as exc:
+                logger.warning("Could not delete obsolete event %s: %s", eid, exc)
 
-    # Final sweep: leftover fuzzy groups with >1 Sylla Sync event
-    for fuzzy, group in list(by_fuzzy.items()):
-        if fuzzy in seen_fuzzy:
-            continue
-        if len(group) <= 1:
-            continue
-        keeper = _prefer_keeper(group)
-        for extra in group:
-            if extra["id"] == keeper["id"] or extra["id"] in keep_event_ids:
+        # Near-duplicate sweep: same course + title fingerprint left outside keep set
+        kept_fingerprints: set[tuple[str, str]] = set()
+        for meta in existing_list:
+            if meta["id"] in keep_event_ids:
+                kept_fingerprints.add(
+                    (
+                        _course_key_from_summary(meta.get("summary") or ""),
+                        _title_fingerprint(meta.get("summary") or ""),
+                    )
+                )
+        for meta in existing_list:
+            eid = meta["id"]
+            if eid in keep_event_ids:
+                continue
+            fp = (
+                _course_key_from_summary(meta.get("summary") or ""),
+                _title_fingerprint(meta.get("summary") or ""),
+            )
+            if not fp[0] or not fp[1] or fp not in kept_fingerprints:
                 continue
             try:
                 if dry_run:
-                    print(f"  x [dry-run] delete orphan duplicate {extra['summary']}")
+                    print(f"  x [dry-run] delete near-duplicate {meta['summary']}")
                 else:
-                    _delete_event(service, calendar_id, extra["id"])
-                    print(f"  x deleted orphan duplicate {extra['summary']}")
+                    _delete_event(service, calendar_id, eid)
+                    print(f"  x deleted near-duplicate {meta['summary']}")
                 counts["deleted"] += 1
+                keep_event_ids.add(eid)  # prevent double-delete below
             except HttpError as exc:
-                logger.warning("Could not delete duplicate %s: %s", extra["id"], exc)
+                logger.warning("Could not delete near-duplicate %s: %s", eid, exc)
+
+        # Final sweep: leftover fuzzy groups with >1 Sylla Sync event
+        for fuzzy, group in list(by_fuzzy.items()):
+            if fuzzy in seen_fuzzy:
+                continue
+            if len(group) <= 1:
+                continue
+            keeper = _prefer_keeper(group)
+            for extra in group:
+                if extra["id"] == keeper["id"] or extra["id"] in keep_event_ids:
+                    continue
+                try:
+                    if dry_run:
+                        print(f"  x [dry-run] delete orphan duplicate {extra['summary']}")
+                    else:
+                        _delete_event(service, calendar_id, extra["id"])
+                        print(f"  x deleted orphan duplicate {extra['summary']}")
+                    counts["deleted"] += 1
+                except HttpError as exc:
+                    logger.warning("Could not delete duplicate %s: %s", extra["id"], exc)
 
     print(
         f"\n[INFO] Calendar: {counts['created']} created, "
@@ -641,7 +669,7 @@ def push_to_google_calendar(
     print()
     logger.info(
         "Calendar sync: created=%d updated=%d unchanged=%d deleted=%d "
-        "obsolete=%d skipped=%d failed=%d dry_run=%s",
+        "obsolete=%d skipped=%d failed=%d dry_run=%s prune=%s",
         counts["created"],
         counts["updated"],
         counts["unchanged"],
@@ -650,5 +678,6 @@ def push_to_google_calendar(
         counts["skipped"],
         counts["failed"],
         dry_run,
+        prune,
     )
     return counts
