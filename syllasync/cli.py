@@ -1,4 +1,4 @@
-"""Sylla Sync â€” consolidate Canvas + syllabus assignments into a live dashboard."""
+"""Sylla Sync — consolidate Canvas + syllabus assignments into a live dashboard."""
 
 from __future__ import annotations
 
@@ -56,7 +56,7 @@ SYLLABI_DIR = BASE_DIR / "syllabi"
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Sylla Sync â€” end-to-end sync of university workload to "
+            "Sylla Sync — end-to-end sync of university workload to "
             "Excel/Google Sheets, Calendar, and Discord."
         )
     )
@@ -469,7 +469,7 @@ def main() -> None:
                 ", ".join(f"{s['course']} {s['section']}" for s in labs) or "none",
             )
             print(
-                f"      Schedule: {schedule.get('term')} â€” "
+                f"      Schedule: {schedule.get('term')} — "
                 f"{len(schedule['sections'])} section(s), "
                 f"{len(labs)} lab(s)."
             )
@@ -480,9 +480,23 @@ def main() -> None:
     # 1. Canvas API & Syllabus Extraction
     # ------------------------------------------------------------------
     print("[1/4] Canvas API & syllabus extraction...")
-    logger.info("Step 1/4 â€” Canvas API & syllabus extraction")
+    logger.info("Step 1/4 — Canvas API & syllabus extraction")
 
-    if not args.skip_canvas_download and not args.syllabus_only:
+    skip_canvas = bool(args.syllabus_only)
+    if not skip_canvas and not canvas_ready():
+        if not args.dry_run:
+            print(
+                "[ERROR] CANVAS_URL or CANVAS_TOKEN is missing or still a placeholder. "
+                "Run: python main.py --check"
+            )
+            sys.exit(1)
+        print(
+            "      [dry-run] Canvas skipped (CANVAS_URL or CANVAS_TOKEN missing or "
+            "still a placeholder). Using local syllabus PDFs only."
+        )
+        skip_canvas = True
+
+    if not args.skip_canvas_download and not skip_canvas:
         try:
             downloaded = download_syllabi_from_canvas(
                 course_filter=args.course,
@@ -507,16 +521,16 @@ def main() -> None:
     try:
         canvas_data, syllabus_data, canvas_failed = fetch_all_data(
             allow_partial=args.allow_partial or args.dry_run,
-            syllabus_only=args.syllabus_only,
+            syllabus_only=skip_canvas,
         )
-        if args.syllabus_only:
+        if skip_canvas:
             canvas_failed = True
     except CanvasFetchError:
         sys.exit(1)
 
     sheet_degraded = canvas_failed
 
-    print("      Sources fetched â€” running dedupe engine...")
+    print("      Sources fetched — running dedupe engine...")
 
     # ------------------------------------------------------------------
     # 2. Google Sheets (--google) or local Excel dashboard

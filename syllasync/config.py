@@ -340,7 +340,7 @@ def collect_config_issues(
                 ConfigIssue(
                     "warn",
                     "CANVAS_URL",
-                    "Canvas settings are not set. Fine for --syllabus-only; required for a normal run.",
+                    "CANVAS_URL / CANVAS_TOKEN are missing or still placeholders. Fine for --syllabus-only and --dry-run; required for a normal run.",
                 )
             )
 
