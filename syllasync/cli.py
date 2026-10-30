@@ -375,16 +375,16 @@ def discord_ready() -> bool:
     return _value_ready(DISCORD_WEBHOOK_URL) and "/api/webhooks/" in DISCORD_WEBHOOK_URL.lower()
 
 
-def _in_memory_frame(canvas_data: list, syllabus_data: list):
+def _in_memory_frame(canvas_data: list, syllabus_data: list, *, dry_run: bool = True):
     """Merge sources without reading or writing Excel / Google Sheets."""
     import pandas as pd
 
     from .dedupe_module import print_dedup_stats
     from .sheets_module import incoming_from_sources, merge_tracker
 
-    incoming, stats = incoming_from_sources(canvas_data, syllabus_data)
+    incoming, stats = incoming_from_sources(canvas_data, syllabus_data, dry_run=dry_run)
     print_dedup_stats(stats)
-    return merge_tracker(pd.DataFrame(), incoming)
+    return merge_tracker(pd.DataFrame(), incoming, dry_run=dry_run)
 
 
 def calendar_prune_enabled(*, canvas_failed: bool, sheet_degraded: bool) -> bool:
@@ -534,7 +534,7 @@ def main() -> None:
                     "(GOOGLE_SHEET_ID or credentials.json missing or still a placeholder). "
                     "Merging in memory only."
                 )
-                df = _in_memory_frame(canvas_data, syllabus_data)
+                df = _in_memory_frame(canvas_data, syllabus_data, dry_run=args.dry_run)
                 sheet_degraded = True
             else:
                 print(
@@ -551,7 +551,7 @@ def main() -> None:
         else:
             if args.dry_run:
                 print("      [dry-run] Local Excel write skipped; merging in-memory only.")
-                df = _in_memory_frame(canvas_data, syllabus_data)
+                df = _in_memory_frame(canvas_data, syllabus_data, dry_run=args.dry_run)
             else:
                 print("      Building local Excel dashboard...")
                 df = export_to_excel_dashboard(canvas_data, syllabus_data)
@@ -564,7 +564,7 @@ def main() -> None:
         failures.append("Google Sheets")
         sheet_degraded = True
         try:
-            df = _in_memory_frame(canvas_data, syllabus_data)
+            df = _in_memory_frame(canvas_data, syllabus_data, dry_run=args.dry_run)
         except Exception as merge_exc:  # noqa: BLE001
             logger.error("In-memory merge failed: %s", redact_text(merge_exc))
             df = None
@@ -579,7 +579,7 @@ def main() -> None:
                 sys.exit(1)
         sheet_degraded = True
         try:
-            df = _in_memory_frame(canvas_data, syllabus_data)
+            df = _in_memory_frame(canvas_data, syllabus_data, dry_run=args.dry_run)
         except Exception as merge_exc:  # noqa: BLE001
             logger.error("In-memory merge failed: %s", redact_text(merge_exc))
             df = None

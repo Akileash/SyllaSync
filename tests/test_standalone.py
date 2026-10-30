@@ -176,6 +176,68 @@ def test_sheet_probe_is_read_only_unless_write(monkeypatch):
     assert test_sheets.parse_args().write is True
 
 
+
+def test_dry_run_does_not_write_task_state(tmp_path, monkeypatch):
+    """--dry-run must not create or rewrite .syllasync_task_state.json."""
+    import json
+    import pandas as pd
+
+    from syllasync.dedupe_module import (
+        STATE_PATH,
+        hydrate_state_from_rows,
+        remember_task_ids,
+        save_task_state,
+    )
+
+    state_file = tmp_path / ".syllasync_task_state.json"
+    monkeypatch.setattr("syllasync.dedupe_module.STATE_PATH", state_file)
+
+    payload = {
+        "by_match_key": {
+            "course 101||homework#1": {"task_id": "syllabus_course_101_hw1_2026-10-01"}
+        },
+        "aliases": {},
+    }
+    state_file.write_text(json.dumps(payload), encoding="utf-8")
+    before = state_file.read_bytes()
+
+    save_task_state({"by_match_key": {}, "aliases": {}}, dry_run=True)
+    assert state_file.read_bytes() == before
+
+    remember_task_ids(
+        pd.DataFrame(
+            [
+                {
+                    "Course": "COURSE 101",
+                    "Assessment title": "HW2",
+                    "Due Date": "2026-10-08",
+                    "Task_ID": "syllabus_course_101_hw2_2026-10-08",
+                }
+            ]
+        ),
+        dry_run=True,
+    )
+    assert state_file.read_bytes() == before
+
+    hydrate_state_from_rows(
+        [
+            {
+                "Course": "COURSE 101",
+                "Assessment title": "HW3",
+                "Due Date": "2026-10-15",
+                "Task_ID": "canvas_1",
+            }
+        ],
+        dry_run=True,
+    )
+    assert state_file.read_bytes() == before
+
+    # Missing file must stay missing under dry-run
+    state_file.unlink()
+    save_task_state({"by_match_key": {}, "aliases": {}}, dry_run=True)
+    assert not state_file.exists()
+
+
 def test_placeholder_detection_does_not_require_the_secret_value():
     assert is_placeholder("your_canvas_api_token") is True
     assert is_placeholder("https://your-university.instructure.com") is True
