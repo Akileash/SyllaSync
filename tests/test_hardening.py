@@ -1350,6 +1350,7 @@ def test_ignored_items_are_not_re_added(tmp_path, monkeypatch):
     import syllasync.sheets_module as sheets_module
 
     monkeypatch.setattr("syllasync.dedupe_module.STATE_PATH", tmp_path / ".syllasync_task_state.json")
+    monkeypatch.setattr("syllasync.config.ALLOWED_COURSES", "")
     ign = tmp_path / "ignored_items.json"
     ign.write_text(_json.dumps({"ignored": [{"task_id": "canvas_814553"}]}))
     monkeypatch.setattr(sheets_module, "IGNORED_ITEMS_PATH", ign)
