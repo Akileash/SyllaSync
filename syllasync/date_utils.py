@@ -454,10 +454,13 @@ def split_title_and_due(title: Any, existing_due: Any = "") -> tuple[str, str]:
     else:
         due_out = existing
 
-    if due_out and weekday_token:
-        target = _WEEKDAY_NAME_TO_INDEX.get(weekday_token)
-        if target is not None:
-            due_out = snap_due_to_weekday(due_out, target)
+    # Weekday words in titles ("Due date Monday Sept 22") are descriptive.
+    # When the fragment already has an explicit month/day (or ISO / numeric
+    # date), keep that calendar date. Snapping to the named weekday caused
+    # off-by-one shifts whenever TERM_YEAR made the date fall on a different
+    # weekday than the syllabus author wrote (Sept 22 2026 is a Tuesday).
+    # Lab-Monday policy lives in apply_lab_monday_due, not here.
+    _ = weekday_token  # captured for clarity; not used to shift dated dues
 
     return clean_title, due_out
 
