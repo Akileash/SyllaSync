@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from safe_text import redact_text
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -12,11 +13,18 @@ from canvasapi.exceptions import CanvasException
 from config import (
     ALLOWED_COURSES,
     CANVAS_PAST_DUE_DAYS,
+    CANVAS_READ_ANNOUNCEMENTS,
     CANVAS_TOKEN,
     CANVAS_URL,
+    TERM_YEAR,
 )
 from course_utils import course_matches_allowed, normalize_course_code, parse_allowed_courses
-from date_utils import apply_lab_monday_due, format_internal_datetime, split_title_and_due
+from date_utils import (
+    apply_lab_monday_due,
+    format_internal_datetime,
+    normalize_calendar_date,
+    split_title_and_due,
+)
 from retry_utils import with_retries
 from schedule_module import load_schedule
 
@@ -24,9 +32,43 @@ logger = logging.getLogger(__name__)
 
 OUTPUT_COLUMNS = ("Source", "Course", "Task", "Due Date")
 
+# Canvas assignments whose due_at falls in a year before the term year (course
+# shells copied from last year). Filled by fetch_canvas_assignments so callers
+# can surface them; the dates are never rewritten to the current year.
+STALE_YEAR_WARNINGS: list[dict[str, Any]] = []
+
 
 class CanvasFetchError(RuntimeError):
     """Raised when Canvas cannot be reached or credentials are invalid."""
+
+
+
+def explain_canvas_error(exc: BaseException) -> str:
+    """Actionable Canvas failure text. Never includes the token."""
+    text = redact_text(exc).lower()
+    if any(marker in text for marker in ("401", "invalid access token", "unauthorized")):
+        return (
+            "Canvas rejected CANVAS_TOKEN (unauthorized). The token is missing, "
+            "expired, or revoked. In Canvas open Account → Settings → New Access Token, "
+            "then put the new token in .env or local.env. The token was not logged."
+        )
+    if "403" in text or "forbidden" in text:
+        return (
+            "Canvas refused this request (forbidden). Confirm the token belongs to "
+            "the account that is enrolled in the courses, and that CANVAS_URL is "
+            "your school's Canvas host. The token was not logged."
+        )
+    if any(marker in text for marker in ("timeout", "timed out", "connection", "503", "502")):
+        return (
+            "Canvas could not be reached (network or temporary outage). "
+            f"Details: {redact_text(exc)} "
+            "Check your connection and re-run. Nothing was written."
+        )
+    return (
+        "Canvas request failed. Check CANVAS_URL and CANVAS_TOKEN in .env or local.env. "
+        f"Details: {redact_text(exc)}"
+    )
+
 
 
 def _format_due_date(due_at: str | None) -> str | None:
@@ -43,6 +85,15 @@ def _format_due_date(due_at: str | None) -> str | None:
         return formatted
     logger.warning("Could not parse due date: %s", due_at)
     return str(due_at)
+
+
+def _has_due_override(course_name: str, raw_title: str) -> bool:
+    """True when due_overrides.json pins this item, so the lookback window must not drop it."""
+    from dedupe_module import fuzzy_match_key
+    from sheets_module import load_due_overrides
+
+    title, _ = split_title_and_due(raw_title, "")
+    return fuzzy_match_key(course_name, title) in load_due_overrides()
 
 
 def _within_window(due_at: str | None, lookback_days: int) -> bool:
@@ -105,6 +156,27 @@ def _list_assignments(course):
     return list(course.get_assignments(order_by="due_at"))
 
 
+@with_retries(label="canvas.get_announcements")
+def _list_announcements(course):
+    return list(course.get_discussion_topics(only_announcements=True))
+
+
+def is_stale_year_due(due_formatted: Any, term_year: int | None = None) -> bool:
+    """True when a (local) due date is in a calendar year before the term year."""
+    iso = normalize_calendar_date(due_formatted)
+    if not iso:
+        return False
+    return int(iso[:4]) < int(term_year if term_year is not None else TERM_YEAR)
+
+
+def _course_label(course) -> str:
+    return (
+        getattr(course, "course_code", None)
+        or getattr(course, "name", None)
+        or f"Course {course.id}"
+    )
+
+
 def fetch_canvas_assignments(
     *,
     lookback_days: int | None = None,
@@ -132,12 +204,10 @@ def fetch_canvas_assignments(
     except Exception as exc:  # network / unexpected
         raise CanvasFetchError(f"Canvas request failed: {exc}") from exc
 
+    STALE_YEAR_WARNINGS.clear()
+
     for course in courses:
-        raw_name = (
-            getattr(course, "course_code", None)
-            or getattr(course, "name", None)
-            or f"Course {course.id}"
-        )
+        raw_name = _course_label(course)
 
         if not course_matches_allowed(raw_name, allowed_courses):
             continue
@@ -157,7 +227,30 @@ def fetch_canvas_assignments(
             if getattr(assignment, "published", True) is False:
                 continue
             due_at = getattr(assignment, "due_at", None)
-            if not _within_window(due_at, lookback):
+            if due_at and is_stale_year_due(_format_due_date(due_at)):
+                # Surface, do not silently drop or auto-convert to this year.
+                logger.warning(
+                    "stale-year due date: %s '%s' (Canvas id %s) due_at=%s is before "
+                    "term year %d - not converted; check Canvas/announcements for the "
+                    "current date.",
+                    course_name,
+                    getattr(assignment, "name", "?"),
+                    getattr(assignment, "id", "?"),
+                    due_at,
+                    TERM_YEAR,
+                )
+                STALE_YEAR_WARNINGS.append(
+                    {
+                        "Course": course_name,
+                        "Task": getattr(assignment, "name", ""),
+                        "Canvas ID": getattr(assignment, "id", None),
+                        "due_at": due_at,
+                        "term_year": TERM_YEAR,
+                    }
+                )
+            if not _within_window(due_at, lookback) and not _has_due_override(
+                course_name, getattr(assignment, "name", "")
+            ):
                 continue
             raw_title = getattr(assignment, "name", "Untitled Assignment")
             due_formatted = _format_due_date(due_at) or "No due date"
@@ -178,4 +271,120 @@ def fetch_canvas_assignments(
             )
 
     logger.info("Fetched %d Canvas assignment(s) (lookback=%dd).", len(assignments), lookback)
+    if STALE_YEAR_WARNINGS:
+        logger.warning(
+            "%d Canvas assignment(s) have stale-year due dates (see warnings above).",
+            len(STALE_YEAR_WARNINGS),
+        )
     return assignments
+
+
+def _posted_year_month(value: Any) -> tuple[int | None, int | None]:
+    local = format_internal_datetime(value) if value else ""
+    iso = normalize_calendar_date(local)
+    if not iso:
+        return None, None
+    return int(iso[:4]), int(iso[5:7])
+
+
+def fetch_canvas_announcement_exams(
+    *,
+    enforce_schedule: bool = True,
+    canvas: Any | None = None,
+) -> list[dict[str, Any]]:
+    """
+    Read Canvas announcements (read-only) and extract dated exam rows.
+
+    Rows look like syllabus rows (Course / Task / Due Date) so the dedupe
+    engine can merge them with an undated syllabus "Midterm" and upgrade it.
+    Never raises: any Canvas or parsing error is logged and yields [].
+    """
+    if not CANVAS_READ_ANNOUNCEMENTS:
+        logger.info("Canvas announcement scan disabled (CANVAS_READ_ANNOUNCEMENTS=0).")
+        return []
+    if canvas is None and (not CANVAS_URL or not CANVAS_TOKEN):
+        logger.warning("Canvas announcement scan skipped: CANVAS_URL/CANVAS_TOKEN not set.")
+        return []
+
+    from syllabus_module import html_to_text, parse_announcement_exam_text
+
+    rows: list[dict[str, Any]] = []
+    try:
+        allowed_courses = parse_allowed_courses(ALLOWED_COURSES)
+        schedule = load_schedule() if enforce_schedule else {"sections": []}
+        client = canvas if canvas is not None else Canvas(CANVAS_URL, CANVAS_TOKEN)
+        courses = _list_courses(client)
+    except Exception as exc:  # noqa: BLE001 - announcements are best-effort
+        logger.warning("Canvas announcement scan skipped: %s", exc)
+        return []
+
+    for course in courses:
+        try:
+            raw_name = _course_label(course)
+            if not course_matches_allowed(raw_name, allowed_courses):
+                continue
+            if enforce_schedule and not section_allowed(raw_name, schedule):
+                continue
+            course_name = normalize_course_code(raw_name) or raw_name
+            topics = _list_announcements(course)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Announcements unavailable for %s: %s",
+                getattr(course, "id", "?"),
+                exc,
+            )
+            continue
+
+        # Newest first so a rescheduled date wins over an older announcement.
+        topics = sorted(
+            topics,
+            key=lambda t: str(getattr(t, "posted_at", "") or ""),
+            reverse=True,
+        )
+        for topic in topics:
+            try:
+                title = str(getattr(topic, "title", "") or "")
+                body = html_to_text(getattr(topic, "message", "") or "")
+                posted_at = getattr(topic, "posted_at", None)
+                year, month = _posted_year_month(posted_at)
+                found = parse_announcement_exam_text(
+                    f"{title}\n{body}",
+                    course_name,
+                    base_year=year,
+                    posted_month=month,
+                    source_ref=(
+                        f"Canvas announcement {getattr(topic, 'id', '?')} "
+                        f"'{title}' ({posted_at})"
+                    ),
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "Could not parse announcement %s in %s: %s",
+                    getattr(topic, "id", "?"),
+                    course_name,
+                    exc,
+                )
+                continue
+            for row in found:
+                if is_stale_year_due(row.get("Due Date")):
+                    logger.warning(
+                        "stale-year due date: announcement %s gives %s %s on %s "
+                        "(before term year %d) - ignored, not converted.",
+                        row.get("Origin"),
+                        row.get("Course"),
+                        row.get("Task"),
+                        row.get("Due Date"),
+                        TERM_YEAR,
+                    )
+                    continue
+                logger.info(
+                    "Announcement exam date: %s %s -> %s (%s)",
+                    row.get("Course"),
+                    row.get("Task"),
+                    row.get("Due Date"),
+                    row.get("Origin"),
+                )
+                rows.append(row)
+
+    logger.info("Extracted %d exam date(s) from Canvas announcements.", len(rows))
+    return rows
