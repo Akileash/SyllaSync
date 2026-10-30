@@ -22,10 +22,10 @@ from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
-from config import BASE_DIR, GOOGLE_CALENDAR_ID
-from course_utils import normalize_course_code
-from date_utils import apply_lab_monday_due, calendar_event_bounds, split_title_and_due
-from dedupe_module import (
+from .config import BASE_DIR, GOOGLE_CALENDAR_ID
+from .course_utils import normalize_course_code
+from .date_utils import apply_lab_monday_due, calendar_event_bounds, split_title_and_due
+from .dedupe_module import (
     TASK_ID_COL,
     ensure_task_id,
     distinct_canvas_ids,
@@ -33,9 +33,9 @@ from dedupe_module import (
     fuzzy_title_key,
     is_droppable_placeholder,
 )
-from retry_utils import with_retries
-from safe_text import explain_google_auth_failure, is_google_auth_failure, redact_text
-from vocab import calendar_color, calendar_summary_prefix, normalize_status
+from .retry_utils import with_retries
+from .safe_text import explain_google_auth_failure, is_google_auth_failure, redact_text
+from .vocab import calendar_color, calendar_summary_prefix, normalize_status
 
 logger = logging.getLogger(__name__)
 

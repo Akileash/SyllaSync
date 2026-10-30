@@ -5,8 +5,8 @@ By default this only reads Masterlist cell A1. Pass --write to store
 "Connection Successful!" in that cell.
 
 Usage:
-    python test_sheets.py
-    python test_sheets.py --write
+    python scripts/test_sheets.py
+    python scripts/test_sheets.py --write
 """
 
 from __future__ import annotations
@@ -20,9 +20,9 @@ import gspread
 from dotenv import load_dotenv
 from gspread.exceptions import APIError, SpreadsheetNotFound
 
-from config import warn_if_tzdata_old
+from syllasync.config import warn_if_tzdata_old
 
-BASE_DIR = Path(__file__).parent
+BASE_DIR = Path(__file__).resolve().parent.parent
 CREDENTIALS_PATH = BASE_DIR / "credentials.json"
 
 # Load environment variables (.env first, then local.env override)

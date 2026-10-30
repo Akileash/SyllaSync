@@ -3,14 +3,14 @@
 from __future__ import annotations
 
 import logging
-from safe_text import redact_text
+from .safe_text import redact_text
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from canvasapi import Canvas
 from canvasapi.exceptions import CanvasException
 
-from config import (
+from .config import (
     ALLOWED_COURSES,
     CANVAS_PAST_DUE_DAYS,
     CANVAS_READ_ANNOUNCEMENTS,
@@ -18,15 +18,15 @@ from config import (
     CANVAS_URL,
     TERM_YEAR,
 )
-from course_utils import course_matches_allowed, normalize_course_code, parse_allowed_courses
-from date_utils import (
+from .course_utils import course_matches_allowed, normalize_course_code, parse_allowed_courses
+from .date_utils import (
     apply_lab_monday_due,
     format_internal_datetime,
     normalize_calendar_date,
     split_title_and_due,
 )
-from retry_utils import with_retries
-from schedule_module import load_schedule
+from .retry_utils import with_retries
+from .schedule_module import load_schedule
 
 logger = logging.getLogger(__name__)
 
@@ -89,8 +89,8 @@ def _format_due_date(due_at: str | None) -> str | None:
 
 def _has_due_override(course_name: str, raw_title: str) -> bool:
     """True when due_overrides.json pins this item, so the lookback window must not drop it."""
-    from dedupe_module import fuzzy_match_key
-    from sheets_module import load_due_overrides
+    from .dedupe_module import fuzzy_match_key
+    from .sheets_module import load_due_overrides
 
     title, _ = split_title_and_due(raw_title, "")
     return fuzzy_match_key(course_name, title) in load_due_overrides()
@@ -306,7 +306,7 @@ def fetch_canvas_announcement_exams(
         logger.warning("Canvas announcement scan skipped: CANVAS_URL/CANVAS_TOKEN not set.")
         return []
 
-    from syllabus_module import html_to_text, parse_announcement_exam_text
+    from .syllabus_module import html_to_text, parse_announcement_exam_text
 
     rows: list[dict[str, Any]] = []
     try:

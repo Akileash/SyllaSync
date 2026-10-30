@@ -1,7 +1,7 @@
 # --- Secrets (never commit) ---
 .env
 .env.*
-!.env.example
+!examples/.env.example
 local.env
 *.pem
 *.key
@@ -24,6 +24,8 @@ Sylla_Sync_Dashboard.xlsx
 !portfolio/**/*.xlsx
 
 # Course PDFs and extracted text — keep folder via .gitkeep only
+COURSE 202/
+COURSE 202/
 syllabi/**
 !syllabi/.gitkeep
 

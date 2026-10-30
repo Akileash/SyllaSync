@@ -9,7 +9,7 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 
-from config import LOCAL_TIMEZONE
+from .config import LOCAL_TIMEZONE
 
 # Reject day-name-only values like "Wed" or "Friday"
 WEEKDAY_ONLY = re.compile(
@@ -341,7 +341,7 @@ def snap_due_to_monday(value: Any) -> str:
 
 def apply_lab_monday_due(course: Any, title: Any, due: Any) -> str:
     """
-    COURSE 202 Online Assignments and Lab Quizzes are due Monday (lab day).
+    For COURSE 202, Online Assignments and Lab Quizzes are due Monday (lab day).
 
     Canvas/syllabus often reuse last-year week-end dates (e.g. Friday Sept 25
     when the lab-week Monday is Sept 21). Snap those back to Monday.
@@ -352,10 +352,10 @@ def apply_lab_monday_due(course: Any, title: Any, due: Any) -> str:
     if not due_text or due_text.lower() in MISSING_DATE_VALUES:
         return due_text
 
-    from course_utils import normalize_course_code  # local import avoids cycle
+    from .course_utils import normalize_course_code  # local import avoids cycle
 
     if normalize_course_code(course_text) != "COURSE 202" and not re.search(
-        r"MATH\s*209", course_text, re.IGNORECASE
+        r"COURSE\s*202", course_text, re.IGNORECASE
     ):
         return due_text
     if re.search(r"online\s*assignment", title_text, re.IGNORECASE):
@@ -411,7 +411,7 @@ def split_title_and_due(title: Any, existing_due: Any = "") -> tuple[str, str]:
       "Online Assignment 2- Due date Oct 6, 11:45 PM"
         → ("Online Assignment 2", "2026-10-06 23:45")
     """
-    from config import TERM_YEAR  # local import avoids circular load at import time
+    from .config import TERM_YEAR  # local import avoids circular load at import time
 
     raw = str(title or "").strip()
     # Normalize newlines so "Title\\nDue date …" still matches
@@ -476,7 +476,7 @@ def coerce_to_term_year(value: Any, term_year: int | None = None) -> str:
     if not m:
         return text
     if term_year is None:
-        from config import TERM_YEAR as term_year  # local import avoids cycle
+        from .config import TERM_YEAR as term_year  # local import avoids cycle
     year, month = int(m.group(1)), int(m.group(2))
     target = term_year if month >= 9 else term_year + 1
     if year == target:

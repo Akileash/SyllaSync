@@ -10,12 +10,12 @@ from pathlib import Path
 
 import pytest
 
-from config import collect_config_issues, format_config_report, is_placeholder
-from main import calendar_prune_enabled
-from retry_utils import is_retryable, with_retries
-from safe_text import clean_path, read_json, redact_text
-from syllabus_module import parse_model_payload
-from vocab import excel_status, sheet_status
+from syllasync.config import collect_config_issues, format_config_report, is_placeholder
+from syllasync.cli import calendar_prune_enabled
+from syllasync.retry_utils import is_retryable, with_retries
+from syllasync.safe_text import clean_path, read_json, redact_text
+from syllasync.syllabus_module import parse_model_payload
+from syllasync.vocab import excel_status, sheet_status
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -41,7 +41,7 @@ def test_sheet_and_excel_never_write_complete():
 
 
 def test_masterlist_status_cell_is_submitted_for_legacy_complete():
-    from google_sheets_module import _internal_to_masterlist_row
+    from syllasync.google_sheets_module import _internal_to_masterlist_row
 
     row = _internal_to_masterlist_row(
         {
@@ -81,7 +81,7 @@ def test_masterlist_status_cell_is_submitted_for_legacy_complete():
 
 
 def test_finished_statuses_tie_so_sheet_value_wins():
-    from vocab import SHEET_STATUS_LABELS, choose_status, preserve_sheet_label, status_rank
+    from syllasync.vocab import SHEET_STATUS_LABELS, choose_status, preserve_sheet_label, status_rank
 
     assert "Submitted" in SHEET_STATUS_LABELS
     assert preserve_sheet_label("Graded") == "Submitted"
@@ -106,10 +106,10 @@ def test_finished_statuses_tie_so_sheet_value_wins():
 def test_merge_keeps_typed_graded_over_synced_submitted(tmp_path, monkeypatch):
     import pandas as pd
 
-    from dedupe_module import TASK_ID_COL
-    from sheets_module import merge_tracker
+    from syllasync.dedupe_module import TASK_ID_COL
+    from syllasync.sheets_module import merge_tracker
 
-    monkeypatch.setattr("dedupe_module.STATE_PATH", tmp_path / "state.json")
+    monkeypatch.setattr("syllasync.dedupe_module.STATE_PATH", tmp_path / "state.json")
     existing = pd.DataFrame(
         [
             {
@@ -142,7 +142,7 @@ def test_merge_keeps_typed_graded_over_synced_submitted(tmp_path, monkeypatch):
 
 
 def test_tzdata_age_check():
-    from config import MIN_TZDATA_VERSION, tzdata_is_old
+    from syllasync.config import MIN_TZDATA_VERSION, tzdata_is_old
 
     assert MIN_TZDATA_VERSION == "2026.5"
     assert tzdata_is_old("2025.1") is True
@@ -164,7 +164,11 @@ def test_edmonton_stays_utc_minus_6_after_november_2026():
 
 
 def test_sheet_probe_is_read_only_unless_write(monkeypatch):
-    import test_sheets
+    import importlib.util
+    _ts = ROOT / "scripts" / "test_sheets.py"
+    _spec = importlib.util.spec_from_file_location("test_sheets", _ts)
+    test_sheets = importlib.util.module_from_spec(_spec)
+    _spec.loader.exec_module(test_sheets)
 
     monkeypatch.setattr(sys, "argv", ["test_sheets.py"])
     assert test_sheets.parse_args().write is False
@@ -183,15 +187,15 @@ def test_placeholder_detection_does_not_require_the_secret_value():
 def test_config_report_never_prints_secret_values(monkeypatch, tmp_path):
     secret = "super-secret-canvas-token-value"
     webhook = "https://discord.com/api/webhooks/999/webhook-secret-value"
-    monkeypatch.setattr("config.CANVAS_URL", "https://school.example.edu")
-    monkeypatch.setattr("config.CANVAS_TOKEN", secret)
-    monkeypatch.setattr("config.DISCORD_WEBHOOK_URL", webhook)
-    monkeypatch.setattr("config.GOOGLE_SHEET_ID", "your_google_sheet_id")
-    monkeypatch.setattr("config.GOOGLE_CALENDAR_ID", "")
-    monkeypatch.setattr("config.GEMINI_API_KEY", "your_gemini_api_key")
-    monkeypatch.setattr("config.CREDENTIALS_PATH", tmp_path / "credentials.json")
-    monkeypatch.setattr("config.SCHEDULE_PATH", tmp_path / "schedule.json")
-    monkeypatch.setattr("config.LOCAL_TIMEZONE", "America/Edmonton")
+    monkeypatch.setattr("syllasync.config.CANVAS_URL", "https://school.example.edu")
+    monkeypatch.setattr("syllasync.config.CANVAS_TOKEN", secret)
+    monkeypatch.setattr("syllasync.config.DISCORD_WEBHOOK_URL", webhook)
+    monkeypatch.setattr("syllasync.config.GOOGLE_SHEET_ID", "your_google_sheet_id")
+    monkeypatch.setattr("syllasync.config.GOOGLE_CALENDAR_ID", "")
+    monkeypatch.setattr("syllasync.config.GEMINI_API_KEY", "your_gemini_api_key")
+    monkeypatch.setattr("syllasync.config.CREDENTIALS_PATH", tmp_path / "credentials.json")
+    monkeypatch.setattr("syllasync.config.SCHEDULE_PATH", tmp_path / "schedule.json")
+    monkeypatch.setattr("syllasync.config.LOCAL_TIMEZONE", "America/Edmonton")
 
     report = format_config_report(
         collect_config_issues(require_google=True, require_discord=True, require_calendar=True)
@@ -235,7 +239,7 @@ def test_read_json_accepts_bom_and_crlf(tmp_path):
 
 
 def test_schedule_loader_accepts_bom(tmp_path, monkeypatch):
-    import schedule_module
+    import syllasync.schedule_module as schedule_module
 
     path = tmp_path / "schedule.json"
     body = {"term": "Fall 2026", "sections": [{"course": "COURSE 302", "type": "LEC", "section": "A1"}]}
@@ -255,7 +259,7 @@ def test_gemini_high_demand_is_retried(monkeypatch):
     assert is_retryable(RuntimeError("API key not valid")) is False
 
     sleeps: list[float] = []
-    monkeypatch.setattr("retry_utils.time.sleep", lambda delay: sleeps.append(delay))
+    monkeypatch.setattr("syllasync.retry_utils.time.sleep", lambda delay: sleeps.append(delay))
     calls = {"n": 0}
 
     @with_retries(max_attempts=3, base_delay=0.01, max_delay=0.05, label="gemini.test")
@@ -299,7 +303,7 @@ def test_parse_model_payload_accepts_fenced_trailing_comma_and_truncated():
 
 
 def test_canvas_error_hides_token():
-    from canvas_module import explain_canvas_error
+    from syllasync.canvas_module import explain_canvas_error
 
     message = explain_canvas_error(RuntimeError("401 invalid access token abc123secret"))
     assert "abc123secret" not in message
@@ -310,7 +314,7 @@ def test_partial_calendar_sync_does_not_delete_events(monkeypatch):
     """A partial run must not delete events. A full run still may."""
     import pandas as pd
 
-    import google_calendar_module as gcal
+    import syllasync.google_calendar_module as gcal
 
     deleted: list[str] = []
     existing = [

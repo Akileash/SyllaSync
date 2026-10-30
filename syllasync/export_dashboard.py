@@ -2,8 +2,8 @@
 Export assignments.xlsx to a polished interactive Sylla_Sync_Dashboard.xlsx.
 
 Usage:
-    python export_dashboard.py
-    python export_dashboard.py --input assignments.xlsx --output Sylla_Sync_Dashboard.xlsx
+    python -m syllasync.export_dashboard
+    python -m syllasync.export_dashboard --input assignments.xlsx --output Sylla_Sync_Dashboard.xlsx
 """
 
 from __future__ import annotations
@@ -49,7 +49,7 @@ def load_and_clean(input_path: Path) -> pd.DataFrame:
     df = df.reindex(columns=COLUMNS)
 
     df["Due Date"] = pd.to_datetime(df["Due Date"], errors="coerce")
-    from vocab import sheet_status
+    from .vocab import sheet_status
 
     df["Status"] = df["Status"].map(
         lambda value: sheet_status(value) if str(value or "").strip() else "Not Started"

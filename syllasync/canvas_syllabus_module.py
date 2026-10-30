@@ -11,14 +11,14 @@ import requests
 from canvasapi import Canvas
 from canvasapi.exceptions import CanvasException
 
-from config import ALLOWED_COURSES, CANVAS_TOKEN, CANVAS_URL
-from course_utils import compact_course_code, course_matches_allowed, parse_allowed_courses
-from retry_utils import with_retries
-from schedule_module import load_schedule
+from .config import BASE_DIR, ALLOWED_COURSES, CANVAS_TOKEN, CANVAS_URL
+from .course_utils import compact_course_code, course_matches_allowed, parse_allowed_courses
+from .retry_utils import with_retries
+from .schedule_module import load_schedule
 
 logger = logging.getLogger(__name__)
 
-SYLLABI_DIR = Path(__file__).parent / "syllabi"
+SYLLABI_DIR = BASE_DIR / "syllabi"
 FILE_TITLE_PATTERNS = re.compile(
     r"syllabus|weekly\s*schedule|tentative\s*weekly\s*schedule|course\s*outline",
     re.IGNORECASE,
@@ -59,7 +59,7 @@ def _download_file(url: str, dest: Path, token: str) -> None:
 
 
 def _section_ok(course_name: str) -> bool:
-    from canvas_module import section_allowed
+    from .canvas_module import section_allowed
 
     return section_allowed(course_name, load_schedule())
 

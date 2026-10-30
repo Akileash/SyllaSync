@@ -10,8 +10,8 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 import pytest
 
-from canvas_module import section_allowed
-from date_utils import (
+from syllasync.canvas_module import section_allowed
+from syllasync.date_utils import (
     calendar_event_bounds,
     due_window_bounds,
     has_explicit_time,
@@ -19,7 +19,7 @@ from date_utils import (
     normalize_calendar_date,
     parse_due_datetime,
 )
-from dedupe_module import (
+from syllasync.dedupe_module import (
     TASK_ID_COL,
     canvas_task_id,
     dedupe_cross_source,
@@ -29,8 +29,8 @@ from dedupe_module import (
     resolve_persisted_task_id,
     syllabus_task_id,
 )
-from google_calendar_module import compute_obsolete_event_ids
-from vocab import calendar_color, calendar_summary_prefix, normalize_status, sheet_status
+from syllasync.google_calendar_module import compute_obsolete_event_ids
+from syllasync.vocab import calendar_color, calendar_summary_prefix, normalize_status, sheet_status
 
 
 # ---------------------------------------------------------------------------
@@ -46,7 +46,7 @@ def test_fuzzy_title_variants_match():
 
 def test_syllabus_to_canvas_promotion(tmp_path, monkeypatch):
     state_file = tmp_path / ".syllasync_task_state.json"
-    monkeypatch.setattr("dedupe_module.STATE_PATH", state_file)
+    monkeypatch.setattr("syllasync.dedupe_module.STATE_PATH", state_file)
 
     canvas = [
         {
@@ -105,7 +105,7 @@ def test_phantom_tasks_flagged():
 
 def test_dedupe_drops_category_phantoms(tmp_path, monkeypatch):
     monkeypatch.setattr(
-        "dedupe_module.STATE_PATH", tmp_path / ".syllasync_task_state.json"
+        "syllasync.dedupe_module.STATE_PATH", tmp_path / ".syllasync_task_state.json"
     )
     kept, stats = dedupe_cross_source(
         [],
@@ -140,7 +140,7 @@ def test_timed_calendar_bounds_not_all_day(monkeypatch):
     # Reload isn't needed â€” local_tz reads config.LOCAL_TIMEZONE at call time
     # but config already loaded; calendar_event_bounds uses local_tz() which
     # reads LOCAL_TIMEZONE from config module â€” patch that.
-    import date_utils
+    import syllasync.date_utils as date_utils
 
     monkeypatch.setattr(date_utils, "LOCAL_TIMEZONE", "America/Edmonton")
     bounds = calendar_event_bounds("2026-09-15 23:59")
@@ -160,7 +160,7 @@ def test_all_day_calendar_bounds():
 
 
 def test_homework_deadline_still_ends_at_due_time(monkeypatch):
-    import date_utils
+    import syllasync.date_utils as date_utils
 
     monkeypatch.setattr(date_utils, "LOCAL_TIMEZONE", "America/Edmonton")
     bounds = calendar_event_bounds("2026-10-09 16:00", title="HW1")
@@ -181,7 +181,7 @@ def _edmonton_offset_suffix(year: int, month: int, day: int, hour: int = 17, min
 
 def test_exam_session_starts_at_parsed_time_mdt_october(monkeypatch):
     """COURSE 101 Midterm 1: 17:30-18:30 America/Edmonton during MDT."""
-    import date_utils
+    import syllasync.date_utils as date_utils
 
     monkeypatch.setattr(date_utils, "LOCAL_TIMEZONE", "America/Edmonton")
     assert is_session_event("Midterm 1") is True
@@ -205,7 +205,7 @@ def test_exam_session_starts_at_parsed_time_mdt_october(monkeypatch):
 
 def test_exam_session_starts_at_parsed_time_mst_november(monkeypatch):
     """COURSE 101 Midterm 2: 17:30-18:30 America/Edmonton after DST ends (MST)."""
-    import date_utils
+    import syllasync.date_utils as date_utils
 
     monkeypatch.setattr(date_utils, "LOCAL_TIMEZONE", "America/Edmonton")
     bounds = calendar_event_bounds(
@@ -228,7 +228,7 @@ def test_exam_session_starts_at_parsed_time_mst_november(monkeypatch):
 
 
 def test_ece_midterm_uses_parsed_end_duration(monkeypatch):
-    import date_utils
+    import syllasync.date_utils as date_utils
 
     monkeypatch.setattr(date_utils, "LOCAL_TIMEZONE", "America/Edmonton")
     bounds = calendar_event_bounds(
@@ -244,7 +244,7 @@ def test_ece_midterm_uses_parsed_end_duration(monkeypatch):
 
 
 def test_due_window_includes_today_through_end_of_day(monkeypatch):
-    import date_utils
+    import syllasync.date_utils as date_utils
 
     monkeypatch.setattr(date_utils, "LOCAL_TIMEZONE", "America/Edmonton")
     tz = ZoneInfo("America/Edmonton")
@@ -306,7 +306,7 @@ def test_section_filter_noop_when_schedule_empty():
 def test_sort_submitted_sinks_to_bottom():
     """Submitted/Complete rows always sort below active work, then by due date."""
     import pandas as pd
-    from sheets_module import sort_by_days_until_due
+    from syllasync.sheets_module import sort_by_days_until_due
 
     df = pd.DataFrame(
         [
@@ -395,7 +395,7 @@ def test_compute_obsolete_event_ids():
 
 def test_calendar_hw1_does_not_match_hw10():
     """Regression: short titles must not collide via startswith (HW1 vs HW10)."""
-    from google_calendar_module import _collect_match_candidates
+    from syllasync.google_calendar_module import _collect_match_candidates
 
     existing = [
         {
@@ -425,7 +425,7 @@ def test_calendar_hw1_does_not_match_hw10():
 
 
 def test_calendar_long_truncated_titles_still_match():
-    from google_calendar_module import _collect_match_candidates
+    from syllasync.google_calendar_module import _collect_match_candidates
 
     existing = [
         {
@@ -449,7 +449,7 @@ def test_calendar_long_truncated_titles_still_match():
 
 
 def test_build_event_sets_confirmed_status():
-    from google_calendar_module import _build_event
+    from syllasync.google_calendar_module import _build_event
 
     event = _build_event(
         {
@@ -486,7 +486,7 @@ def test_calendar_status_prefix_and_color():
 
 
 def test_discord_skips_completed_status():
-    from discord_module import _is_finished_status
+    from syllasync.discord_module import _is_finished_status
 
     assert _is_finished_status("Complete") is True
     assert _is_finished_status("Completed") is True
@@ -498,7 +498,7 @@ def test_discord_skips_completed_status():
 
 
 def test_canvas_utc_due_converts_to_local(monkeypatch):
-    import date_utils
+    import syllasync.date_utils as date_utils
 
     monkeypatch.setattr(date_utils, "LOCAL_TIMEZONE", "America/Edmonton")
     # 2026-09-17 05:59 UTC == 2026-09-16 23:59 MDT
@@ -509,7 +509,7 @@ def test_canvas_utc_due_converts_to_local(monkeypatch):
 
 
 def test_assignment_one_fuzzy_key():
-    from dedupe_module import fuzzy_match_key, fuzzy_title_key
+    from syllasync.dedupe_module import fuzzy_match_key, fuzzy_title_key
 
     assert fuzzy_title_key("Assignment One - 2026 Co-op Agreement") == "assignment#1"
     assert fuzzy_title_key("Assignment 1") == "assignment#1"
@@ -519,9 +519,9 @@ def test_assignment_one_fuzzy_key():
 
 
 def test_split_title_and_due_moves_date_out_of_title(monkeypatch):
-    import date_utils
+    import syllasync.date_utils as date_utils
 
-    monkeypatch.setattr("config.TERM_YEAR", 2026)
+    monkeypatch.setattr("syllasync.config.TERM_YEAR", 2026)
 
     title, due = date_utils.split_title_and_due(
         "Online Assignment 2- Due date Oct 6, 11:45 PM", ""
@@ -560,22 +560,26 @@ def test_split_title_and_due_moves_date_out_of_title(monkeypatch):
     assert due4.startswith("2026-11-17")
 
 
-def test_mth_vs_course_101w_normalize_same():
-    from course_utils import courses_equivalent, normalize_course_code, prefer_course_label
-    from dedupe_module import fuzzy_match_key
+def test_mth_vs_math_101w_normalize_same():
+    from syllasync.course_utils import courses_equivalent, normalize_course_code, prefer_course_label
+    from syllasync.dedupe_module import fuzzy_match_key
 
+    # Abbreviation collapse (MTH -> MATH) with a made-up catalog number.
+    assert normalize_course_code("MTH 101") == "MATH 101"
+    assert normalize_course_code("Math 101W") == "MATH 101"
+    assert normalize_course_code("MATH 101") == "MATH 101"
+    assert courses_equivalent("MTH 101", "MATH 101W")
+    assert prefer_course_label("MTH 101", "MATH 101W") == "MATH 101"
+    assert fuzzy_match_key("MTH 101", "Assignment 1") == fuzzy_match_key(
+        "MATH 101W", "Assignment 1"
+    )
+    # Generic COURSE / CRS alias used in fixtures.
     assert normalize_course_code("CRS 101") == "COURSE 101"
     assert normalize_course_code("COURSE 101W") == "COURSE 101"
-    assert normalize_course_code("COURSE 101") == "COURSE 101"
-    assert courses_equivalent("CRS 101", "COURSE 101W")
-    assert prefer_course_label("CRS 101", "COURSE 101W") == "COURSE 101"
-    assert fuzzy_match_key("CRS 101", "Assignment 1") == fuzzy_match_key(
-        "COURSE 101W", "Assignment 1"
-    )
 
 
 def test_merge_drops_stale_labs_placeholder():
-    from sheets_module import merge_tracker
+    from syllasync.sheets_module import merge_tracker
 
     existing = pd.DataFrame(
         [
@@ -623,7 +627,7 @@ def test_merge_drops_stale_labs_placeholder():
 
 def test_cross_source_dedupe_collapses_course_aliases(tmp_path, monkeypatch):
     monkeypatch.setattr(
-        "dedupe_module.STATE_PATH", tmp_path / ".syllasync_task_state.json"
+        "syllasync.dedupe_module.STATE_PATH", tmp_path / ".syllasync_task_state.json"
     )
     canvas = [
         {
@@ -651,8 +655,8 @@ def test_syllabus_exam_keeps_start_of_clock_range():
 
     "5:30- 6:30pm" keeps the start (17:30), not the end (18:30).
     """
-    from config import TERM_YEAR
-    from syllabus_module import parse_syllabus_exam_text
+    from syllasync.config import TERM_YEAR
+    from syllasync.syllabus_module import parse_syllabus_exam_text
 
     text = "First midterm exam 25% Friday, October 9, 5:30- 6:30pm"
     rows = parse_syllabus_exam_text(text, "COURSE 101")
@@ -665,7 +669,7 @@ def test_syllabus_exam_keeps_start_of_clock_range():
 def test_timed_duplicate_wins_over_date_only(tmp_path, monkeypatch):
     """Collapsing the same task must keep a clock time over a date-only due."""
     monkeypatch.setattr(
-        "dedupe_module.STATE_PATH", tmp_path / ".syllasync_task_state.json"
+        "syllasync.dedupe_module.STATE_PATH", tmp_path / ".syllasync_task_state.json"
     )
     date_only = {
         "Course": "COURSE 101",
@@ -682,7 +686,7 @@ def test_timed_duplicate_wins_over_date_only(tmp_path, monkeypatch):
         assert len(kept) == 1
         assert kept[0]["Due Date"] == "2026-10-09 17:30"
 
-    from sheets_module import _collapse_by_match_key
+    from syllasync.sheets_module import _collapse_by_match_key
 
     forward = pd.DataFrame(
         [
@@ -716,8 +720,8 @@ def test_gemini_uses_filename_catalog_course_over_inferred_title():
     """
     import json
 
-    from course_utils import courses_equivalent, normalize_course_code
-    from syllabus_module import (
+    from syllasync.course_utils import courses_equivalent, normalize_course_code
+    from syllasync.syllabus_module import (
         _course_from_filename,
         _parse_gemini_response,
         parse_weekly_schedule_text,
@@ -758,8 +762,8 @@ def test_gemini_keeps_course_when_filename_has_no_catalog_code():
     """Without a catalog code in the filename, Gemini's Course is preserved."""
     import json
 
-    from course_utils import normalize_course_code
-    from syllabus_module import _course_from_filename, _parse_gemini_response
+    from syllasync.course_utils import normalize_course_code
+    from syllasync.syllabus_module import _course_from_filename, _parse_gemini_response
 
     filename = "Weekly Readings Overview.pdf"
     from_file = _course_from_filename(filename)
@@ -778,10 +782,10 @@ def test_gemini_keeps_course_when_filename_has_no_catalog_code():
 # ---------------------------------------------------------------------------
 
 
-def test_ece202_midterm_range_without_start_meridiem():
+def test_course301_midterm_range_without_start_meridiem():
     """'Oct. 15 at 11-12:20 pm' is 11:00 (not 23:00); the 'Oct.' period parses."""
-    from config import TERM_YEAR
-    from syllabus_module import _due_with_following_clock, parse_syllabus_exam_text
+    from syllasync.config import TERM_YEAR
+    from syllasync.syllabus_module import _due_with_following_clock, parse_syllabus_exam_text
 
     text = (
         "Laboratories Synchronous Specified in each lab 15% Midterm exam Synchronous "
@@ -801,7 +805,7 @@ def test_ece202_midterm_range_without_start_meridiem():
 
 
 def test_course_from_filename_does_not_glue_syllabus_letter():
-    from syllabus_module import _course_from_filename
+    from syllasync.syllabus_module import _course_from_filename
 
     assert _course_from_filename("COURSE301SYLLABUS.pdf") == "COURSE 301"
     assert _course_from_filename("COURSE301_Syllabus.pdf") == "COURSE 301"
@@ -811,7 +815,7 @@ def test_course_from_filename_does_not_glue_syllabus_letter():
 
 
 def test_exam_period_sentence_does_not_create_dated_final():
-    from syllabus_module import parse_syllabus_exam_text
+    from syllasync.syllabus_module import parse_syllabus_exam_text
 
     text = (
         "Final exam Synchronous UofA will post the exam schedule online to the Exam "
@@ -873,11 +877,11 @@ class _FakeCanvas:
 
 
 def test_announcement_midterm_upgrades_undated_syllabus_row(tmp_path, monkeypatch):
-    import canvas_module
-    from sheets_module import _collapse_by_match_key
-    from syllabus_module import parse_announcement_exam_text
+    import syllasync.canvas_module as canvas_module
+    from syllasync.sheets_module import _collapse_by_match_key
+    from syllasync.syllabus_module import parse_announcement_exam_text
 
-    monkeypatch.setattr("dedupe_module.STATE_PATH", tmp_path / ".syllasync_task_state.json")
+    monkeypatch.setattr("syllasync.dedupe_module.STATE_PATH", tmp_path / ".syllasync_task_state.json")
     monkeypatch.setattr(canvas_module, "CANVAS_READ_ANNOUNCEMENTS", True)
     monkeypatch.setattr(canvas_module, "ALLOWED_COURSES", "COURSE 401,COURSE 302")
     monkeypatch.setattr(canvas_module, "TERM_YEAR", 2026)
@@ -959,7 +963,7 @@ def test_announcement_midterm_upgrades_undated_syllabus_row(tmp_path, monkeypatc
 
 
 def test_announcement_scan_never_raises(monkeypatch):
-    import canvas_module
+    import syllasync.canvas_module as canvas_module
 
     monkeypatch.setattr(canvas_module, "CANVAS_READ_ANNOUNCEMENTS", True)
     monkeypatch.setattr(canvas_module, "load_schedule", lambda: {"sections": []})
@@ -972,7 +976,7 @@ def test_announcement_scan_never_raises(monkeypatch):
 def test_stale_year_canvas_due_is_warned_not_converted(monkeypatch, caplog):
     import logging
 
-    import canvas_module
+    import syllasync.canvas_module as canvas_module
 
     course = _FakeCourse(
         36126,
@@ -1002,8 +1006,8 @@ def test_stale_year_canvas_due_is_warned_not_converted(monkeypatch, caplog):
 
 
 # --- Term-year coercion for syllabus/Gemini dates (2020 Lab Quiz bug) ---
-from date_utils import coerce_to_term_year
-from syllabus_module import _parse_gemini_response, SYLLABUS_PROMPT
+from syllasync.date_utils import coerce_to_term_year
+from syllasync.syllabus_module import _parse_gemini_response, SYLLABUS_PROMPT
 
 
 def test_coerce_wrong_fall_year_to_term():
@@ -1022,8 +1026,8 @@ def test_coerce_leaves_tbd_and_correct_dates():
 
 
 def test_gemini_response_with_2020_dates_lands_in_term_year(monkeypatch):
-    import syllabus_module
-    monkeypatch.setattr("config.TERM_YEAR", 2026)
+    import syllasync.syllabus_module as syllabus_module
+    monkeypatch.setattr("syllasync.config.TERM_YEAR", 2026)
     raw = '[{"Course": "COURSE 202", "Task": "Lab Quiz 1", "Due Date": "2020-09-21"},' \
           ' {"Course": "COURSE 202", "Task": "Lab Quiz 5", "Due Date": "2020-11-30"}]'
     rows = _parse_gemini_response(raw, "COURSE 202 - Lab Problem Schedule")
@@ -1037,21 +1041,21 @@ def test_prompt_states_term_year():
 
 
 # --- Advanced Seminar alias / COURSE 202 lab quiz dedupe ---
-from course_utils import normalize_course_code as _ncc
-from date_utils import apply_lab_monday_due as _m209
+from syllasync.course_utils import normalize_course_code as _ncc
+from syllasync.date_utils import apply_lab_monday_due as _m209
 
 
-def test_multivariable_calculus_maps_to_math209():
+def test_advanced_seminar_maps_to_course202():
     assert _ncc("Advanced Seminar") == "COURSE 202"
-    assert _ncc("  multivariable   calculus ") == "COURSE 202"
+    assert _ncc("  advanced   seminar ") == "COURSE 202"
 
 
-def test_multivariable_lab_quiz_snaps_to_monday():
+def test_seminar_lab_quiz_snaps_to_monday():
     assert _m209("Advanced Seminar", "Lab Quiz 1", "2026-09-25").startswith("2026-09-21")
 
 
-def test_dedupe_merges_multivariable_and_math209_lab_quiz(tmp_path, monkeypatch):
-    monkeypatch.setattr("dedupe_module.STATE_PATH", tmp_path / "state.json")
+def test_dedupe_merges_seminar_and_course202_lab_quiz(tmp_path, monkeypatch):
+    monkeypatch.setattr("syllasync.dedupe_module.STATE_PATH", tmp_path / "state.json")
     syllabus = [
         {"Source": "Syllabus", "Course": "COURSE 202", "Task": "Lab Quiz 3", "Due Date": "2026-10-26"},
         {"Source": "Syllabus", "Course": "Advanced Seminar", "Task": "Lab Quiz 3", "Due Date": "2026-10-30"},
@@ -1065,7 +1069,7 @@ def test_dedupe_merges_multivariable_and_math209_lab_quiz(tmp_path, monkeypatch)
 
 def test_sheet_collapse_keeps_status_and_monday():
     import pandas as pd
-    from sheets_module import _collapse_by_match_key
+    from syllasync.sheets_module import _collapse_by_match_key
     df = pd.DataFrame([
         {"Course": "Advanced Seminar", "Assessment title": "Lab Quiz 1", "Due Date": "2026-09-25", "Status": "Submitted"},
         {"Course": "COURSE 202", "Assessment title": "Lab Quiz 1", "Due Date": "2026-09-21", "Status": ""},
@@ -1079,7 +1083,7 @@ def test_sheet_collapse_keeps_status_and_monday():
 
 
 # --- Grading-weight percentages must not become exam titles ---
-from syllabus_module import parse_syllabus_exam_text as _pset
+from syllasync.syllabus_module import parse_syllabus_exam_text as _pset
 
 
 def test_grade_weight_not_in_midterm_title():
@@ -1103,13 +1107,13 @@ def test_numbered_midterm_still_kept():
 
 
 def test_midterm_and_midterm_exam_share_fuzzy_key():
-    from dedupe_module import fuzzy_match_key
+    from syllasync.dedupe_module import fuzzy_match_key
     assert fuzzy_match_key("COURSE 202", "Midterm") == fuzzy_match_key("COURSE 202", "Midterm Exam")
 
 
 # --- Status must never be downgraded by merges; Calendar prefix follows it ---
 def test_prefer_status_never_downgrades():
-    from vocab import prefer_status
+    from syllasync.vocab import prefer_status
     assert prefer_status("Complete", "Submitted") == "Complete"   # typed Complete kept
     assert prefer_status("Submitted", "Complete") == "Submitted"  # stale Complete never wins
     assert prefer_status("Not Started", "Submitted") == "Submitted"
@@ -1120,7 +1124,7 @@ def test_prefer_status_never_downgrades():
 
 def test_collapse_keeps_submitted_over_complete_duplicate():
     import pandas as pd
-    from sheets_module import _collapse_by_match_key
+    from syllasync.sheets_module import _collapse_by_match_key
     df = pd.DataFrame([
         {"Course": "COURSE 101W", "Assessment title": "Midterm 1", "Due Date": "2026-10-09 17:30", "Status": "Submitted"},
         {"Course": "COURSE 101", "Assessment title": "Midterm 1", "Due Date": "2026-10-09 17:30", "Status": "Complete"},
@@ -1130,7 +1134,7 @@ def test_collapse_keeps_submitted_over_complete_duplicate():
 
 
 def test_calendar_event_summary_reflects_status():
-    from google_calendar_module import _build_event
+    from syllasync.google_calendar_module import _build_event
     base = {"Course": "COURSE 101", "Assessment title": "Midterm 1", "Due Date": "2026-10-09 17:30",
             "Task_ID": "syllabus_course_101_midterm_1_2026-10-09"}
     assert _build_event({**base, "Status": "Complete"})["summary"].startswith("[SUBMITTED] ")
@@ -1138,7 +1142,7 @@ def test_calendar_event_summary_reflects_status():
 
 
 def test_calendar_equivalence_detects_status_change():
-    from google_calendar_module import _build_event, _events_equivalent
+    from syllasync.google_calendar_module import _build_event, _events_equivalent
     base = {"Course": "COURSE 101", "Assessment title": "Midterm 1", "Due Date": "2026-10-09 17:30",
             "Task_ID": "t1"}
     old = _build_event({**base, "Status": "Submitted"})
@@ -1155,10 +1159,10 @@ def test_calendar_equivalence_detects_status_change():
 
 
 def test_merge_keeps_existing_timed_due_over_date_only_announcement(tmp_path, monkeypatch):
-    from sheets_module import merge_tracker
+    from syllasync.sheets_module import merge_tracker
 
     # Never touch the real .syllasync_task_state.json
-    monkeypatch.setattr("dedupe_module.STATE_PATH", tmp_path / ".syllasync_task_state.json")
+    monkeypatch.setattr("syllasync.dedupe_module.STATE_PATH", tmp_path / ".syllasync_task_state.json")
 
     existing = pd.DataFrame([{
         "Course": "COURSE 401", "Assessment title": "Midterm",
@@ -1176,8 +1180,8 @@ def test_merge_keeps_existing_timed_due_over_date_only_announcement(tmp_path, mo
 
 
 def test_due_override_sets_timed_due_and_end_and_calendar_bounds(tmp_path):
-    from date_utils import calendar_event_bounds
-    from sheets_module import apply_due_overrides, load_due_overrides
+    from syllasync.date_utils import calendar_event_bounds
+    from syllasync.sheets_module import apply_due_overrides, load_due_overrides
 
     path = tmp_path / "due_overrides.json"
     path.write_text(json.dumps({"overrides": [{
@@ -1203,7 +1207,7 @@ def test_due_override_sets_timed_due_and_end_and_calendar_bounds(tmp_path):
 
 
 def test_due_overrides_missing_file_is_noop(tmp_path):
-    from sheets_module import apply_due_overrides, load_due_overrides
+    from syllasync.sheets_module import apply_due_overrides, load_due_overrides
 
     assert load_due_overrides(tmp_path / "nope.json") == {}
     df = pd.DataFrame([{"Course": "X 1", "Assessment title": "A", "Due Date": "2026-01-01"}])
@@ -1224,9 +1228,9 @@ def _lab_row(title, tid, due, status=""):
 
 
 def test_distinct_canvas_ids_with_same_fuzzy_title_stay_separate(tmp_path, monkeypatch):
-    from sheets_module import merge_tracker
+    from syllasync.sheets_module import merge_tracker
 
-    monkeypatch.setattr("dedupe_module.STATE_PATH", tmp_path / ".syllasync_task_state.json")
+    monkeypatch.setattr("syllasync.dedupe_module.STATE_PATH", tmp_path / ".syllasync_task_state.json")
     assert fuzzy_title_key("Lab 1 Pre-lab Submission") == fuzzy_title_key("Lab 1 Report Submission")
     existing = pd.DataFrame([_lab_row("Lab 1 Pre-lab Submission", "canvas_783548", "2026-10-15 14:00", "Submitted")])
     incoming = pd.DataFrame([
@@ -1243,7 +1247,7 @@ def test_distinct_canvas_ids_with_same_fuzzy_title_stay_separate(tmp_path, monke
 
 
 def test_dedupe_keeps_both_canvas_items_with_same_fuzzy_title(tmp_path, monkeypatch):
-    monkeypatch.setattr("dedupe_module.STATE_PATH", tmp_path / ".syllasync_task_state.json")
+    monkeypatch.setattr("syllasync.dedupe_module.STATE_PATH", tmp_path / ".syllasync_task_state.json")
     canvas = [
         {"Course": "COURSE 302", "Task": "Lab 1 Pre-lab Submission", "Due Date": "2026-10-15 14:00", "Canvas ID": 783548},
         {"Course": "COURSE 302", "Task": "Lab 1 Report Submission", "Due Date": "2026-10-29 14:00", "Canvas ID": 783549},
@@ -1253,7 +1257,7 @@ def test_dedupe_keeps_both_canvas_items_with_same_fuzzy_title(tmp_path, monkeypa
 
 
 def test_calendar_candidates_skip_other_canvas_ids():
-    from google_calendar_module import _collect_match_candidates
+    from syllasync.google_calendar_module import _collect_match_candidates
 
     prelab = {"id": "evA", "summary": "COURSE 302 - Lab 1 Pre-lab Submission",
               "task_id": "canvas_783548", "fuzzy_key": "course 302||lab#1"}
@@ -1274,9 +1278,9 @@ def test_calendar_candidates_skip_other_canvas_ids():
 
 
 def test_syllabus_row_still_merges_into_single_canvas_row(tmp_path, monkeypatch):
-    from sheets_module import merge_tracker
+    from syllasync.sheets_module import merge_tracker
 
-    monkeypatch.setattr("dedupe_module.STATE_PATH", tmp_path / ".syllasync_task_state.json")
+    monkeypatch.setattr("syllasync.dedupe_module.STATE_PATH", tmp_path / ".syllasync_task_state.json")
     existing = pd.DataFrame([_lab_row("Midterm", "syllabus_course_302_midterm_x", "2026-10-27", "Complete")])
     incoming = pd.DataFrame([_lab_row("Midterm", "canvas_794672", "2026-10-27")])
     out = merge_tracker(existing, incoming)
@@ -1287,7 +1291,7 @@ def test_syllabus_row_still_merges_into_single_canvas_row(tmp_path, monkeypatch)
 
 
 def test_same_title_in_two_canvas_shells_collapses_to_dated_copy(tmp_path, monkeypatch):
-    monkeypatch.setattr("dedupe_module.STATE_PATH", tmp_path / ".syllasync_task_state.json")
+    monkeypatch.setattr("syllasync.dedupe_module.STATE_PATH", tmp_path / ".syllasync_task_state.json")
     canvas = [
         {"Course": "COURSE 301", "Task": "Submit (Lab 1 - Results)", "Due Date": "No due date", "Canvas ID": 802732},
         {"Course": "COURSE 301", "Task": "Submit (Lab 1 - Results)", "Due Date": "2026-10-23 16:30", "Canvas ID": 761091},
@@ -1311,12 +1315,12 @@ def test_sheet_status_never_writes_complete_for_aliases():
 
 def test_merge_keeps_sheet_submitted_over_stale_complete_state(tmp_path, monkeypatch):
     import json as _json
-    from sheets_module import merge_tracker
+    from syllasync.sheets_module import merge_tracker
 
     state_file = tmp_path / ".syllasync_task_state.json"
     state_file.write_text(_json.dumps({"by_match_key": {"course 101||homework#6": {
         "Status": "Complete", "task_id": "syllabus_course_101_hw6_2026-10-22"}}, "aliases": {}}))
-    monkeypatch.setattr("dedupe_module.STATE_PATH", state_file)
+    monkeypatch.setattr("syllasync.dedupe_module.STATE_PATH", state_file)
     row = {"Course": "COURSE 101", "Assessment title": "HW6", "Due Date": "2026-10-22 17:00",
            "Estimated time dedicated to task": "", "Priority": "", "Is Draft": False,
            TASK_ID_COL: "syllabus_course_101_hw6_2026-10-22"}
@@ -1327,8 +1331,8 @@ def test_merge_keeps_sheet_submitted_over_stale_complete_state(tmp_path, monkeyp
 
 
 def test_submitted_is_finished_on_calendar_and_sort():
-    from google_calendar_module import _build_event
-    from sheets_module import sort_by_days_until_due
+    from syllasync.google_calendar_module import _build_event
+    from syllasync.sheets_module import sort_by_days_until_due
 
     ev = _build_event({"Course": "COURSE 101", "Assessment title": "HW6", "Due Date": "2026-10-22 17:00",
                        "Status": "Submitted", "Task_ID": "t-hw6"})
@@ -1343,9 +1347,9 @@ def test_submitted_is_finished_on_calendar_and_sort():
 
 def test_ignored_items_are_not_re_added(tmp_path, monkeypatch):
     import json as _json
-    import sheets_module
+    import syllasync.sheets_module as sheets_module
 
-    monkeypatch.setattr("dedupe_module.STATE_PATH", tmp_path / ".syllasync_task_state.json")
+    monkeypatch.setattr("syllasync.dedupe_module.STATE_PATH", tmp_path / ".syllasync_task_state.json")
     ign = tmp_path / "ignored_items.json"
     ign.write_text(_json.dumps({"ignored": [{"task_id": "canvas_814553"}]}))
     monkeypatch.setattr(sheets_module, "IGNORED_ITEMS_PATH", ign)
