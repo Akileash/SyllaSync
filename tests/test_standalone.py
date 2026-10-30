@@ -65,7 +65,7 @@ def test_masterlist_status_cell_is_submitted_for_legacy_complete():
         }
     )
     assert graded is not None
-    assert graded[1] == "Graded"
+    assert graded[1] == "Submitted"
 
     done = _internal_to_masterlist_row(
         {
@@ -83,13 +83,13 @@ def test_masterlist_status_cell_is_submitted_for_legacy_complete():
 def test_finished_statuses_tie_so_sheet_value_wins():
     from vocab import SHEET_STATUS_LABELS, choose_status, preserve_sheet_label, status_rank
 
-    assert "Graded" in SHEET_STATUS_LABELS
-    assert preserve_sheet_label("Graded") == "Graded"
+    assert "Submitted" in SHEET_STATUS_LABELS
+    assert preserve_sheet_label("Graded") == "Submitted"
     assert preserve_sheet_label("Complete") == "Submitted"
     assert preserve_sheet_label("Done") == "Submitted"
     assert status_rank("Graded") == status_rank("Submitted")
     assert status_rank("Done") == status_rank("Complete") == status_rank("Cancelled")
-    assert choose_status("Graded", "Submitted") == "Graded"
+    assert choose_status("Graded", "Submitted") == "Submitted"
     assert choose_status("Submitted", "Graded") == "Submitted"
     assert choose_status("Submitted", "Not Started") == "Submitted"
     assert choose_status("Not Started", "Done") == "Submitted"
@@ -375,6 +375,7 @@ def _isolated_env() -> dict[str, str]:
     ):
         env.pop(name, None)
     env["PYTHONUTF8"] = "1"
+    env["SYLLASYNC_SKIP_DOTENV"] = "1"
     return env
 
 
@@ -396,6 +397,8 @@ def test_check_and_dry_run_with_dummy_config():
         cwd=ROOT,
         env=env,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         capture_output=True,
         check=False,
     )
@@ -410,6 +413,8 @@ def test_check_and_dry_run_with_dummy_config():
         cwd=ROOT,
         env=env,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         capture_output=True,
         check=False,
     )
@@ -426,6 +431,8 @@ def test_check_reports_missing_names_without_a_dotenv_file():
         cwd=ROOT,
         env=_isolated_env(),
         text=True,
+        encoding="utf-8",
+        errors="replace",
         capture_output=True,
         check=False,
     )
