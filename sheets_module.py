@@ -14,11 +14,18 @@ from openpyxl.worksheet.datavalidation import DataValidation
 
 from config import EXCEL_FILE_PATH
 from course_utils import prefer_course_label
-from date_utils import apply_lab_monday_due, split_title_and_due
+from vocab import prefer_status
+from date_utils import (
+    apply_lab_monday_due,
+    has_explicit_time,
+    prefer_timed_due,
+    split_title_and_due,
+)
 from dedupe_module import (
     TASK_ID_COL,
     dedupe_cross_source,
     fuzzy_match_key,
+    identity_key,
     is_droppable_placeholder,
     remember_task_ids,
     records_to_tracker_frame,
@@ -86,7 +93,7 @@ COLUMN_ALIGNMENTS = {
     "Is Draft": Alignment(horizontal="center", vertical="center"),
 }
 
-STATUS_OPTIONS = '"Not Started,In Progress,Submitted,Graded,Cancelled"'
+STATUS_OPTIONS = '"Not started,In Progress,Done"'
 PRIORITY_OPTIONS = '"P 1,P 2,P 3"'
 
 
@@ -138,13 +145,26 @@ def _collapse_by_match_key(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return df.reindex(columns=cols)
 
-    from vocab import choose_status
-
     best: dict[str, dict[str, Any]] = {}
+    # Canvas rows group by their Canvas Task_ID (two Canvas items never merge);
+    # non-Canvas rows join the first Canvas row sharing their fuzzy key, else
+    # group by fuzzy key as before.
+    fuzzy_to_canvas: dict[str, str] = {}
+    if TASK_ID_COL in df.columns:
+        for _, r in df.iterrows():
+            tid = str(r.get(TASK_ID_COL, "") or "").strip()
+            if tid.startswith("canvas_"):
+                fuzzy_to_canvas.setdefault(
+                    fuzzy_match_key(r.get("Course", ""), r.get("Assessment title", "")), tid
+                )
     for _, row in df.iterrows():
         key = fuzzy_match_key(row.get("Course", ""), row.get("Assessment title", ""))
         if key == "||":
             continue
+        ikey = identity_key(
+            row.get("Course", ""), row.get("Assessment title", ""), row.get(TASK_ID_COL, "")
+        )
+        key = ikey if ikey != key else fuzzy_to_canvas.get(key, key)
 
         if key not in best:
             best[key] = {col: row.get(col, "") for col in df.columns}
@@ -169,23 +189,84 @@ def _collapse_by_match_key(df: pd.DataFrame) -> pd.DataFrame:
             existing[TASK_ID_COL] = _prefer_task_id(
                 existing.get(TASK_ID_COL, ""), row.get(TASK_ID_COL, "")
             )
-        if not str(existing.get("Due Date", "")).strip() and str(
-            row.get("Due Date", "")
-        ).strip():
-            existing["Due Date"] = row.get("Due Date", "")
+        if "Due Date" in df.columns or "Due Date" in existing:
+            existing["Due Date"] = prefer_timed_due(
+                existing.get("Due Date", ""), row.get("Due Date", "")
+            )
         for col in MANUAL_COLUMNS:
-            if col not in df.columns:
-                continue
-            if col == "Status":
-                existing[col] = choose_status(existing.get(col, ""), row.get(col, ""))
-                continue
-            if not str(existing.get(col, "")).strip():
+            if col == "Status" and col in df.columns:
+                existing[col] = prefer_status(existing.get(col, ""), row.get(col, ""))
+            elif col in df.columns and not str(existing.get(col, "")).strip():
                 existing[col] = row.get(col, "")
+        # Same COURSE 202 lab quiz from two labels/dates -> one item on the Monday.
+        if "Due Date" in existing:
+            existing["Due Date"] = apply_lab_monday_due(
+                existing.get("Course", ""),
+                existing.get("Assessment title", ""),
+                existing.get("Due Date", ""),
+            )
 
     if not best:
         return pd.DataFrame(columns=cols)
 
     return pd.DataFrame(list(best.values()), columns=list(df.columns))
+
+
+IGNORED_ITEMS_PATH = Path(__file__).resolve().parent / "ignored_items.json"
+
+
+def load_ignored_task_ids(path: Path | None = None) -> set[str]:
+    """Task_IDs listed in ignored_items.json ({"ignored": [{"task_id": ...}, ...]})."""
+    import json
+
+    p = Path(path) if path else IGNORED_ITEMS_PATH
+    if not p.exists():
+        return set()
+    try:
+        data = json.loads(p.read_text(encoding="utf-8-sig"))
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.warning("Could not read %s: %s", p, exc)
+        return set()
+    items = data.get("ignored", []) if isinstance(data, dict) else []
+    out: set[str] = set()
+    for item in items:
+        tid = item.get("task_id") if isinstance(item, dict) else item
+        if str(tid or "").strip():
+            out.add(str(tid).strip())
+    return out
+
+
+def _drop_ignored_items(frame: pd.DataFrame) -> pd.DataFrame:
+    """Explicitly suppressed items (by Task_ID) are never re-added from sources."""
+    ignored = load_ignored_task_ids()
+    if not ignored or frame.empty or TASK_ID_COL not in frame.columns:
+        return frame
+    mask = frame[TASK_ID_COL].astype(str).str.strip().isin(ignored)
+    if mask.any():
+        logger.info(
+            "Suppressed %d item(s) listed in ignored_items.json: %s",
+            int(mask.sum()),
+            sorted(frame.loc[mask, TASK_ID_COL].astype(str)),
+        )
+    return frame[~mask].reset_index(drop=True)
+
+
+def _restrict_to_allowed_courses(frame: pd.DataFrame) -> pd.DataFrame:
+    """Incoming rows outside ALLOWED_COURSES never reach the tracker (existing rows are untouched)."""
+    from config import ALLOWED_COURSES
+    from course_utils import course_matches_allowed, parse_allowed_courses
+
+    allowed = parse_allowed_courses(ALLOWED_COURSES)
+    if not allowed or frame.empty or "Course" not in frame.columns:
+        return frame
+    mask = frame["Course"].astype(str).map(lambda c: course_matches_allowed(c, allowed))
+    if (~mask).any():
+        logging.getLogger(__name__).warning(
+            "Dropped %d incoming row(s) outside ALLOWED_COURSES: %s",
+            int((~mask).sum()),
+            sorted(set(frame.loc[~mask, "Course"].astype(str))),
+        )
+    return frame[mask].reset_index(drop=True)
 
 
 def _incoming_from_sources(
@@ -199,7 +280,7 @@ def _incoming_from_sources(
         (incoming DataFrame with Task_ID, DedupStats)
     """
     records, stats = dedupe_cross_source(canvas_data, syllabus_data)
-    frame = records_to_tracker_frame(records)
+    frame = _drop_ignored_items(_restrict_to_allowed_courses(records_to_tracker_frame(records)))
     cols = AUTO_COLUMNS + ["Source"]
     return frame.reindex(columns=cols).fillna(""), stats
 
@@ -271,6 +352,58 @@ def _is_droppable_placeholder(title: Any, due: Any = "") -> bool:
     return is_droppable_placeholder(title, due)
 
 
+DUE_OVERRIDES_PATH = Path(__file__).resolve().parent / "due_overrides.json"
+
+
+def load_due_overrides(path: Path | None = None) -> dict[str, dict[str, Any]]:
+    """
+    Read manual due/end-time overrides keyed by fuzzy (course, title).
+
+    File format: {"overrides": [{"course": "COURSE 401", "title": "Midterm",
+    "due": "2026-10-23 11:00", "end": "2026-10-23 11:50"}]}. Missing file -> {}.
+    """
+    import json
+
+    p = Path(path) if path else DUE_OVERRIDES_PATH
+    if not p.exists():
+        return {}
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.warning("Could not read %s: %s", p, exc)
+        return {}
+    out: dict[str, dict[str, Any]] = {}
+    items = data.get("overrides", []) if isinstance(data, dict) else []
+    for item in items:
+        if not isinstance(item, dict) or not str(item.get("due") or "").strip():
+            continue
+        key = fuzzy_match_key(item.get("course", ""), item.get("title", ""))
+        if key != "||":
+            out[key] = item
+    return out
+
+
+def apply_due_overrides(
+    df: pd.DataFrame, overrides: dict[str, dict[str, Any]] | None = None
+) -> pd.DataFrame:
+    """Manual due/end overrides win over any source (e.g. date-only announcements)."""
+    overrides = load_due_overrides() if overrides is None else overrides
+    if df.empty or not overrides:
+        return df
+    out = df.copy()
+    if any(str(o.get("end") or "").strip() for o in overrides.values()) and "End Date" not in out.columns:
+        out["End Date"] = ""
+    for idx, row in out.iterrows():
+        ov = overrides.get(fuzzy_match_key(row.get("Course", ""), row.get("Assessment title", "")))
+        if not ov:
+            continue
+        out.at[idx, "Due Date"] = str(ov["due"]).strip()
+        end = str(ov.get("end") or "").strip()
+        if end:
+            out.at[idx, "End Date"] = end
+    return out
+
+
 def _merge_tracker(existing: pd.DataFrame, incoming: pd.DataFrame) -> pd.DataFrame:
     """
     Merge synced data with the existing tracker.
@@ -282,11 +415,10 @@ def _merge_tracker(existing: pd.DataFrame, incoming: pd.DataFrame) -> pd.DataFra
     - Near-duplicate titles within the same course are collapsed.
     """
     existing = existing.reindex(columns=COLUMNS).fillna("")
-    incoming_columns = list(AUTO_COLUMNS)
-    for extra in ("Status", "Source"):
-        if extra in incoming.columns and extra not in incoming_columns:
-            incoming_columns.append(extra)
-    incoming = incoming.reindex(columns=incoming_columns).fillna("")
+    extra_cols = [c for c in ("Source", "End Date") if c in incoming.columns]
+    incoming = incoming.reindex(
+        columns=[c for c in AUTO_COLUMNS + extra_cols if c in incoming.columns or c in AUTO_COLUMNS]
+    ).fillna("")
     for col in AUTO_COLUMNS:
         if col not in incoming.columns:
             incoming[col] = ""
@@ -319,69 +451,102 @@ def _merge_tracker(existing: pd.DataFrame, incoming: pd.DataFrame) -> pd.DataFra
     manual_by_task_id: dict[str, dict[str, Any]] = {}
     existing_title_by_key: dict[str, str] = {}
     existing_task_id_by_key: dict[str, str] = {}
+    existing_due_by_key: dict[str, Any] = {}
 
+    fuzzy_to_existing: dict[str, str] = {}
+    fuzzy_to_existing_canvas: dict[str, str] = {}
     for _, row in existing.iterrows():
-        key = fuzzy_match_key(row["Course"], row["Assessment title"])
-        if key == "||":
+        fkey = fuzzy_match_key(row["Course"], row["Assessment title"])
+        if fkey == "||":
             continue
+        key = identity_key(row["Course"], row["Assessment title"], row.get(TASK_ID_COL, ""))
+        if key == fkey:
+            fuzzy_to_existing.setdefault(fkey, key)
+        else:
+            fuzzy_to_existing_canvas.setdefault(fkey, key)
         manual = {col: row.get(col, "") for col in MANUAL_COLUMNS}
         manual_by_key[key] = manual
         existing_title_by_key[key] = str(row.get("Assessment title", ""))
+        existing_due_by_key[key] = row.get("Due Date", "")
         task_id = str(row.get(TASK_ID_COL, "") or "").strip()
         if task_id:
             manual_by_task_id[task_id] = manual
             existing_task_id_by_key[key] = task_id
 
-    from vocab import choose_status
-
     merged_rows: list[dict[str, Any]] = []
     incoming_keys: set[str] = set()
     incoming_task_ids: set[str] = set()
 
+    incoming_fuzzy: set[str] = set()
     for _, row in incoming.iterrows():
-        key = fuzzy_match_key(row["Course"], row["Assessment title"])
-        if key == "||":
+        fkey = fuzzy_match_key(row["Course"], row["Assessment title"])
+        if fkey == "||":
             continue
+        own_tid = str(row.get(TASK_ID_COL, "") or "").strip()
+        ikey = identity_key(row["Course"], row["Assessment title"], own_tid)
+        if ikey in manual_by_key:
+            key = ikey
+        elif ikey != fkey:
+            # Canvas item not on the sheet yet: it may adopt a syllabus row
+            # (promotion) but never a different Canvas item with a similar title.
+            key = fuzzy_to_existing.get(fkey, ikey)
+        else:
+            key = fuzzy_to_existing.get(fkey) or fuzzy_to_existing_canvas.get(fkey) or ikey
+        incoming_fuzzy.add(fkey)
 
-        task_id = str(row.get(TASK_ID_COL, "") or "").strip() or existing_task_id_by_key.get(
-            key, ""
-        )
+        task_id = own_tid or existing_task_id_by_key.get(key, "")
         incoming_keys.add(key)
         if task_id:
             incoming_task_ids.add(task_id)
 
-        manual = dict(
-            manual_by_task_id.get(task_id)
-            or manual_by_key.get(key)
-            or {col: "" for col in MANUAL_COLUMNS}
-        )
-        manual["Status"] = choose_status(manual.get("Status", ""), row.get("Status", ""))
+        by_tid = manual_by_task_id.get(task_id) or {}
+        by_key = manual_by_key.get(key) or {}
+        manual = dict(by_tid or by_key or {col: "" for col in MANUAL_COLUMNS})
+        if by_tid and by_key:
+            # Task_ID and fuzzy-key rows can differ; never downgrade the status.
+            manual["Status"] = prefer_status(by_tid.get("Status", ""), by_key.get("Status", ""))
         title = _prefer_title(
             existing_title_by_key.get(key, ""),
             str(row.get("Assessment title", "")),
         )
-        due = row.get("Due Date", "")
+        # Incoming wins when both are timed or both are date-only. A date-only
+        # or blank incoming value must not wipe a clock time already stored.
+        incoming_due = row.get("Due Date", "")
+        existing_due = existing_due_by_key.get(key, "")
+        if has_explicit_time(existing_due) and not has_explicit_time(incoming_due):
+            due = existing_due
+        else:
+            due = incoming_due
         title, due = split_title_and_due(title, due)
         due = apply_lab_monday_due(row["Course"], title, due)
         if _is_droppable_placeholder(title, due):
             continue
-        merged_rows.append(
-            {
-                "Course": row["Course"],
-                "Assessment title": title,
-                "Due Date": due,
-                TASK_ID_COL: task_id,
-                "Is Draft": row.get("Is Draft", False),
-                **manual,
-            }
-        )
+        merged = {
+            "Course": row["Course"],
+            "Assessment title": title,
+            "Due Date": due,
+            TASK_ID_COL: task_id,
+            "Is Draft": row.get("Is Draft", False),
+            **manual,
+        }
+        end_date = str(row.get("End Date", "") or "").strip()
+        if end_date:
+            merged["End Date"] = end_date
+        source = str(row.get("Source", "") or "").strip()
+        if source:
+            merged["Source"] = source
+        merged_rows.append(merged)
 
     for _, row in existing.iterrows():
         key = fuzzy_match_key(row["Course"], row["Assessment title"])
         if key == "||":
             continue
         task_id = str(row.get(TASK_ID_COL, "") or "").strip()
-        if key in incoming_keys or (task_id and task_id in incoming_task_ids):
+        ikey = identity_key(row["Course"], row["Assessment title"], task_id)
+        if ikey in incoming_keys or (task_id and task_id in incoming_task_ids):
+            continue
+        if ikey == key and key in incoming_fuzzy:
+            # Non-Canvas row superseded by an incoming item with the same fuzzy title
             continue
         title = str(row.get("Assessment title", "") or "")
         due = row.get("Due Date", "")
@@ -395,14 +560,24 @@ def _merge_tracker(existing: pd.DataFrame, incoming: pd.DataFrame) -> pd.DataFra
         kept["Due Date"] = due
         merged_rows.append(kept)
 
-    if not merged_rows:
-        return pd.DataFrame(columns=COLUMNS)
+    out_cols = list(COLUMNS)
+    for extra in ("Source", "End Date"):
+        if any(extra in row for row in merged_rows) and extra not in out_cols:
+            out_cols.append(extra)
 
-    df = pd.DataFrame(merged_rows, columns=COLUMNS)
+    if not merged_rows:
+        return pd.DataFrame(columns=out_cols)
+
+    df = pd.DataFrame(merged_rows)
+    for col in out_cols:
+        if col not in df.columns:
+            df[col] = ""
+    df = df.reindex(columns=out_cols).fillna("")
     df = _collapse_by_match_key(df)
     # Final pass after title cleanup — catches Online Assignment 1 vs …
     df = _sanitize_frame(df)
     df = _collapse_by_match_key(df)
+    df = apply_due_overrides(df)
     df = _sort_by_days_until_due(df)
     remember_task_ids(df)
     return df
@@ -505,12 +680,7 @@ def _apply_conditional_formatting(ws, header_row: int, data_row_count: int) -> N
     ws.conditional_formatting.add(
         f"A{first_row}:{get_column_letter(len(COLUMNS))}{last_row}",
         FormulaRule(
-            formula=[
-                f'OR(${status_col}{first_row}="Submitted",'
-                f'${status_col}{first_row}="Graded",'
-                f'${status_col}{first_row}="Cancelled",'
-                f'${status_col}{first_row}="Done")'
-            ],
+            formula=[f'${status_col}{first_row}="Done"'],
             fill=done_fill,
             font=done_font,
         ),

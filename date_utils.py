@@ -19,8 +19,33 @@ WEEKDAY_ONLY = re.compile(
 
 MISSING_DATE_VALUES = {"", "tbd", "no due date", "n/a", "none", "unknown"}
 
-# Timed Calendar events span this many minutes ending at the due time
+# Timed Calendar events span this many minutes (deadlines end at due; sessions start at due)
 DEFAULT_EVENT_DURATION_MINUTES = 60
+
+# In-person / scheduled assessments: Calendar event STARTS at the parsed time.
+# Homework/assignment deadlines keep the opposite convention (event ENDS at due).
+_SESSION_EVENT_RE = re.compile(
+    r"\b(midterms?|finals?|exams?)\b",
+    re.IGNORECASE,
+)
+_QUIZ_EVENT_RE = re.compile(r"\bquizzes?\b", re.IGNORECASE)
+
+
+def is_session_event(title: Any, source: Any = None) -> bool:
+    """
+    True when the timed value is a session start (exam/midterm/final), not a deadline.
+
+    Syllabus-sourced quizzes are treated as sessions; Canvas quizzes stay deadlines.
+    """
+    text = str(title or "").strip()
+    if not text:
+        return False
+    if _SESSION_EVENT_RE.search(text):
+        return True
+    if _QUIZ_EVENT_RE.search(text) and str(source or "").strip().lower() == "syllabus":
+        return True
+    return False
+
 
 
 def local_tz() -> ZoneInfo:
@@ -52,6 +77,31 @@ def has_explicit_time(value: Any) -> bool:
     return bool(parsed.hour or parsed.minute or parsed.second)
 
 
+def due_rank(value: Any) -> int:
+    """Rank how specific a due value is: 0 empty/TBD, 1 date-only, 2 timed."""
+    if has_explicit_time(value):
+        return 2
+    if normalize_calendar_date(value):
+        return 1
+    return 0
+
+
+def prefer_timed_due(primary: Any, secondary: Any) -> str:
+    """Prefer the more specific due value: timed > date-only > empty/TBD.
+
+    A date-only value never replaces a timed one, and an empty/TBD value
+    never replaces a date. When both sides are equally specific the primary
+    value wins if it is non-empty.
+    """
+    pri = str(primary or "").strip()
+    sec = str(secondary or "").strip()
+    if due_rank(sec) > due_rank(pri):
+        return sec
+    if due_rank(pri) > due_rank(sec):
+        return pri
+    return pri or sec
+
+
 def parse_due_datetime(value: Any) -> datetime | None:
     """Parse due value as timezone-aware local datetime, or None."""
     if value is None or (isinstance(value, float) and pd.isna(value)):
@@ -70,11 +120,19 @@ def parse_due_datetime(value: Any) -> datetime | None:
     return dt
 
 
-def calendar_event_bounds(value: Any) -> dict[str, Any] | None:
+def calendar_event_bounds(
+    value: Any,
+    *,
+    title: Any = None,
+    source: Any = None,
+    end_value: Any = None,
+) -> dict[str, Any] | None:
     """
     Build Google Calendar start/end dicts.
 
-    Timed dues (e.g. 23:59) → timed event ending at due time.
+    Deadline dues (homework, Canvas quizzes): timed event ENDING at due time.
+    Session events (midterms/exams/finals, syllabus quizzes): timed event
+    STARTING at the parsed time; end_value used when provided, else +60 min.
     Date-only → all-day event (exclusive end = next day).
     """
     dt = parse_due_datetime(value)
@@ -82,14 +140,24 @@ def calendar_event_bounds(value: Any) -> dict[str, Any] | None:
         return None
 
     if has_explicit_time(value):
-        end = dt
-        start = end - timedelta(minutes=DEFAULT_EVENT_DURATION_MINUTES)
         tz_name = str(local_tz())
+        if is_session_event(title, source):
+            start = dt
+            end_dt = parse_due_datetime(end_value) if end_value not in (None, "") else None
+            if end_dt is not None and end_dt > start:
+                end = end_dt
+            else:
+                end = start + timedelta(minutes=DEFAULT_EVENT_DURATION_MINUTES)
+            sort_anchor = start
+        else:
+            end = dt
+            start = end - timedelta(minutes=DEFAULT_EVENT_DURATION_MINUTES)
+            sort_anchor = end
         return {
             "start": {"dateTime": start.isoformat(), "timeZone": tz_name},
             "end": {"dateTime": end.isoformat(), "timeZone": tz_name},
             "all_day": False,
-            "sort_key": end.isoformat(),
+            "sort_key": sort_anchor.isoformat(),
         }
 
     iso_date = dt.strftime("%Y-%m-%d")
@@ -284,7 +352,11 @@ def apply_lab_monday_due(course: Any, title: Any, due: Any) -> str:
     if not due_text or due_text.lower() in MISSING_DATE_VALUES:
         return due_text
 
-    if not re.search(r"MATH\s*209", course_text, re.IGNORECASE):
+    from course_utils import normalize_course_code  # local import avoids cycle
+
+    if normalize_course_code(course_text) != "COURSE 202" and not re.search(
+        r"MATH\s*209", course_text, re.IGNORECASE
+    ):
         return due_text
     if re.search(r"online\s*assignment", title_text, re.IGNORECASE):
         return snap_due_to_monday(due_text)
@@ -388,3 +460,25 @@ def split_title_and_due(title: Any, existing_due: Any = "") -> tuple[str, str]:
             due_out = snap_due_to_weekday(due_out, target)
 
     return clean_title, due_out
+
+
+def coerce_to_term_year(value: Any, term_year: int | None = None) -> str:
+    """
+    Force a syllabus/Gemini date onto the current academic term.
+
+    Syllabi often omit the year, and Gemini then guesses one (e.g. 2020 because
+    Sept 21 fell on a Monday that year). Sep-Dec -> term_year, Jan-Aug ->
+    term_year + 1. Only for syllabus/Gemini sources, never Canvas (Canvas keeps
+    its stale-year warning for genuinely old items).
+    """
+    text = str(value or "").strip()
+    m = re.match(r"^(\d{4})-(\d{2})-(\d{2})(.*)$", text)
+    if not m:
+        return text
+    if term_year is None:
+        from config import TERM_YEAR as term_year  # local import avoids cycle
+    year, month = int(m.group(1)), int(m.group(2))
+    target = term_year if month >= 9 else term_year + 1
+    if year == target:
+        return text
+    return f"{target}-{m.group(2)}-{m.group(3)}{m.group(4)}"

@@ -1,4 +1,4 @@
-"""Sylla Sync — consolidate Canvas + syllabus assignments into a live dashboard."""
+"""Sylla Sync â€” consolidate Canvas + syllabus assignments into a live dashboard."""
 
 from __future__ import annotations
 
@@ -8,14 +8,18 @@ import sys
 import time
 from pathlib import Path
 
-from canvas_module import CanvasFetchError, fetch_canvas_assignments
+from canvas_module import (
+    STALE_YEAR_WARNINGS,
+    CanvasFetchError,
+    fetch_canvas_announcement_exams,
+    fetch_canvas_assignments,
+)
 from canvas_syllabus_module import download_syllabi_from_canvas
 from config import (
     ALLOWED_COURSES,
     BASE_DIR,
     CANVAS_TOKEN,
     CANVAS_URL,
-    CREDENTIALS_PATH,
     DISCORD_WEBHOOK_URL,
     EXCEL_FILE_PATH,
     GOOGLE_CALENDAR_ID,
@@ -25,6 +29,7 @@ from config import (
     validate_env,
     warn_if_tzdata_old,
 )
+from safe_text import configure_stdio, redact_text
 from course_utils import parse_allowed_courses
 from discord_module import send_weekly_digest
 from export_dashboard import export_dashboard
@@ -33,7 +38,6 @@ from google_sheets_module import (
     load_from_google_sheet,
     push_from_records,
 )
-from safe_text import configure_stdio, redact_text
 from sheets_module import update_sheet
 from syllabus_module import fetch_syllabus_assignments
 
@@ -52,7 +56,7 @@ SYLLABI_DIR = BASE_DIR / "syllabi"
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Sylla Sync — end-to-end sync of university workload to "
+            "Sylla Sync â€” end-to-end sync of university workload to "
             "Excel/Google Sheets, Calendar, and Discord."
         )
     )
@@ -104,6 +108,7 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Skip Canvas assignment fetch; parse local syllabi only (implies --allow-partial).",
     )
+
     parser.add_argument(
         "--check",
         "--validate",
@@ -112,6 +117,35 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Report missing or placeholder configuration and exit. "
             "Does not call Canvas, Google, Gemini, or Discord, and does not print secret values."
+        ),
+    )
+    parser.add_argument(
+        "--install-schedule",
+        action="store_true",
+        help="Register a daily Windows Task Scheduler job that runs main.py --all.",
+    )
+    parser.add_argument(
+        "--uninstall-schedule",
+        action="store_true",
+        help="Remove the SyllaSync Windows Task Scheduler job.",
+    )
+    parser.add_argument(
+        "--time",
+        default="18:00",
+        metavar="HH:MM",
+        help="Daily run time for --install-schedule / --daemon (24-hour HH:MM, default 18:00).",
+    )
+    parser.add_argument(
+        "--task-name",
+        default="SyllaSync Daily",
+        help="Task Scheduler task name (default: 'SyllaSync Daily').",
+    )
+    parser.add_argument(
+        "--daemon",
+        action="store_true",
+        help=(
+            "Stay running and execute the --all pipeline once a day at --time "
+            "(stdlib loop; no Task Scheduler)."
         ),
     )
     return parser.parse_args()
@@ -225,37 +259,54 @@ def fetch_all_data(
             canvas_data = fetch_canvas_assignments()
         except CanvasFetchError as exc:
             canvas_failed = True
-            logger.error("Canvas fetch failed loudly: %s", redact_text(exc))
+            logger.error("Canvas fetch failed loudly: %s", exc)
             if not allow_partial:
                 print(
-                    f"[ERROR] Canvas outage / auth failure: {redact_text(exc)}\n"
+                    f"[ERROR] Canvas outage / auth failure: {exc}\n"
                     "        Aborting downstream writes to avoid incomplete Sheets/"
                     "Calendar sync. Re-run with --allow-partial or --syllabus-only "
-                    "to proceed with degraded data. "
-                    "With --allow-partial, Calendar deletes stay off."
+                    "to proceed with degraded data."
                 )
                 raise
             logger.warning(
                 "Continuing with empty Canvas data (--allow-partial / --syllabus-only)."
             )
-            print(
-                f"      Warning: Canvas failed ({redact_text(exc)}); "
-                "continuing with partial data. Calendar deletes stay off."
-            )
+            print(f"      Warning: Canvas failed ({exc}); continuing with partial data.")
             canvas_data = []
         except Exception as exc:
+            # Unexpected errors also fail loud unless partial allowed
             canvas_failed = True
-            logger.error("Canvas fetch failed: %s", redact_text(exc))
+            logger.error("Canvas fetch failed: %s", exc)
             if not allow_partial:
-                raise CanvasFetchError(redact_text(exc)) from exc
+                raise CanvasFetchError(str(exc)) from exc
             canvas_data = []
+
+    if STALE_YEAR_WARNINGS:
+        print(
+            f"      Warning: {len(STALE_YEAR_WARNINGS)} Canvas assignment(s) have a "
+            "stale-year due date (not converted):"
+        )
+        for item in STALE_YEAR_WARNINGS:
+            print(f"        - {item['Course']} '{item['Task']}' due_at={item['due_at']}")
 
     try:
         syllabus_data = fetch_syllabus_assignments()
     except Exception as exc:
-        logger.error("Syllabus parsing failed: %s", redact_text(exc))
-        print(f"      Warning: syllabus parsing failed ({redact_text(exc)}).")
+        logger.error("Syllabus parsing failed: %s", exc)
         syllabus_data = []
+
+    if not syllabus_only:
+        # Exam dates that only appear in Canvas announcements. Best-effort:
+        # failures are logged and never abort the pipeline. Announcement rows
+        # go first so a dated announcement wins over an undated syllabus row.
+        try:
+            announcement_rows = fetch_canvas_announcement_exams()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Canvas announcement scan failed: %s", exc)
+            announcement_rows = []
+        if announcement_rows:
+            print(f"      Announcements: {len(announcement_rows)} exam date(s) found.")
+            syllabus_data = list(announcement_rows) + list(syllabus_data)
 
     if not canvas_data and not syllabus_data:
         logger.warning("No data retrieved from any source.")
@@ -294,6 +345,7 @@ def export_to_google_sheet(
     )
 
 
+
 def _value_ready(value: str) -> bool:
     return bool(str(value or "").strip()) and not is_placeholder(value)
 
@@ -307,11 +359,11 @@ def canvas_ready() -> bool:
 
 
 def google_sheets_ready() -> bool:
-    return _value_ready(GOOGLE_SHEET_ID) and CREDENTIALS_PATH.is_file()
+    return _value_ready(GOOGLE_SHEET_ID) and (BASE_DIR / "credentials.json").is_file()
 
 
 def google_calendar_ready() -> bool:
-    if not _value_ready(GOOGLE_CALENDAR_ID) or not CREDENTIALS_PATH.is_file():
+    if not _value_ready(GOOGLE_CALENDAR_ID) or not (BASE_DIR / "credentials.json").is_file():
         return False
     lowered = GOOGLE_CALENDAR_ID.lower()
     if "calendar.google.com" in lowered or lowered.endswith(".ics") or lowered.startswith("http"):
@@ -321,16 +373,6 @@ def google_calendar_ready() -> bool:
 
 def discord_ready() -> bool:
     return _value_ready(DISCORD_WEBHOOK_URL) and "/api/webhooks/" in DISCORD_WEBHOOK_URL.lower()
-
-
-def calendar_prune_enabled(*, canvas_failed: bool, sheet_degraded: bool) -> bool:
-    """
-    Keep the existing delete step only when this run saw a full source set.
-
-    A failed Canvas fetch or a Sheet that could not be read must not delete
-    events that are simply missing from the partial data.
-    """
-    return not canvas_failed and not sheet_degraded
 
 
 def _in_memory_frame(canvas_data: list, syllabus_data: list):
@@ -345,9 +387,42 @@ def _in_memory_frame(canvas_data: list, syllabus_data: list):
     return merge_tracker(pd.DataFrame(), incoming)
 
 
+def calendar_prune_enabled(*, canvas_failed: bool, sheet_degraded: bool) -> bool:
+    """
+    Keep the existing delete step only when this run saw a full source set.
+
+    A failed Canvas fetch or a Sheet that could not be read must not delete
+    events that are simply missing from the partial data.
+    """
+    return not canvas_failed and not sheet_degraded
+
+
 def main() -> None:
     configure_stdio()
     args = apply_all_flag(parse_args())
+
+    # Early schedule dispatch: install/uninstall exit; daemon loops.
+    if args.install_schedule or args.uninstall_schedule or args.daemon:
+        from schedule_installer import install_schedule, run_daemon, uninstall_schedule
+
+        if args.install_schedule:
+            raise SystemExit(
+                install_schedule(time=args.time, task_name=args.task_name)
+            )
+        if args.uninstall_schedule:
+            raise SystemExit(uninstall_schedule(task_name=args.task_name))
+
+        def _daemon_run() -> None:
+            import subprocess
+
+            subprocess.run(
+                [sys.executable, str(Path(__file__).resolve()), "--all"],
+                check=False,
+            )
+
+        run_daemon(time=args.time, run_fn=_daemon_run)
+        return
+
     if not args.check:
         warn_if_tzdata_old()
     if args.check:
@@ -359,8 +434,7 @@ def main() -> None:
             strict=False,
         )
         print(format_config_report(issues))
-        sys.exit(1 if any(issue.level == "error" for issue in issues) else 0)
-
+        raise SystemExit(1 if any(issue.level == "error" for issue in issues) else 0)
     issues = validate_env(
         require_discord=args.weekly and not args.dry_run,
         require_google=args.google and not args.dry_run,
@@ -395,7 +469,7 @@ def main() -> None:
                 ", ".join(f"{s['course']} {s['section']}" for s in labs) or "none",
             )
             print(
-                f"      Schedule: {schedule.get('term')} — "
+                f"      Schedule: {schedule.get('term')} â€” "
                 f"{len(schedule['sections'])} section(s), "
                 f"{len(labs)} lab(s)."
             )
@@ -406,83 +480,43 @@ def main() -> None:
     # 1. Canvas API & Syllabus Extraction
     # ------------------------------------------------------------------
     print("[1/4] Canvas API & syllabus extraction...")
-    logger.info("Step 1/4 — Canvas API & syllabus extraction")
-    failures: list[str] = []
-    canvas_failed = False
+    logger.info("Step 1/4 â€” Canvas API & syllabus extraction")
 
     if not args.skip_canvas_download and not args.syllabus_only:
-        if not canvas_ready():
-            print(
-                "      Canvas syllabus download skipped "
-                "(CANVAS_URL / CANVAS_TOKEN missing or still a placeholder)."
-            )
-        else:
-            try:
-                downloaded = download_syllabi_from_canvas(
-                    course_filter=args.course,
-                    allowed_courses=allowed_courses or None,
-                )
-                if downloaded:
-                    logger.info(
-                        "Downloaded %d syllabus/schedule PDF(s) from Canvas.",
-                        len(downloaded),
-                    )
-                    print(f"      Downloaded {len(downloaded)} PDF(s) from Canvas.")
-            except Exception as exc:  # noqa: BLE001 — one source must not abort the run
-                logger.warning("Canvas syllabus download failed: %s", redact_text(exc))
-                print(
-                    "      Warning: syllabus download failed "
-                    f"({redact_text(exc)}). Continuing with assignments and local PDFs."
-                )
-
-    if args.syllabus_only or not canvas_ready():
-        if args.syllabus_only:
-            logger.warning("Syllabus-only mode: skipping Canvas assignment fetch.")
-            print("      Syllabus-only: Canvas assignment fetch skipped.")
-        else:
-            print(
-                "      Canvas assignment fetch skipped "
-                "(CANVAS_URL / CANVAS_TOKEN missing or still a placeholder)."
-            )
-            if not args.dry_run:
-                canvas_failed = True
         try:
-            syllabus_data = fetch_syllabus_assignments()
-        except Exception as exc:  # noqa: BLE001
-            logger.error("Syllabus parsing failed: %s", redact_text(exc))
-            print(f"      Warning: syllabus parsing failed ({redact_text(exc)}).")
-            syllabus_data = []
-        canvas_data = []
-    else:
-        try:
-            canvas_data, syllabus_data, fetch_failed = fetch_all_data(
-                allow_partial=args.allow_partial or args.dry_run,
-                syllabus_only=False,
+            downloaded = download_syllabi_from_canvas(
+                course_filter=args.course,
+                allowed_courses=allowed_courses or None,
             )
-            canvas_failed = canvas_failed or fetch_failed
+            if downloaded:
+                logger.info(
+                    "Downloaded %d syllabus/schedule PDF(s) from Canvas.",
+                    len(downloaded),
+                )
+                print(f"      Downloaded {len(downloaded)} PDF(s) from Canvas.")
         except CanvasFetchError as exc:
-            canvas_failed = True
-            print(f"[ERROR] {redact_text(exc)}")
-            if not args.allow_partial and not args.dry_run:
-                print(
-                    "        Sheet and Calendar writes were not started, so existing "
-                    "rows and events were left unchanged. Re-run with --allow-partial "
-                    "to continue from local syllabi only (Calendar deletes stay off)."
-                )
+            logger.error("Canvas syllabus download failed: %s", exc)
+            if not (args.allow_partial or args.dry_run):
+                print(f"[ERROR] Canvas syllabus download failed: {exc}")
                 sys.exit(1)
-            print("      Continuing with syllabus data only. Calendar deletes are off.")
-            try:
-                syllabus_data = fetch_syllabus_assignments()
-            except Exception as syll_exc:  # noqa: BLE001
-                logger.error("Syllabus parsing failed: %s", redact_text(syll_exc))
-                syllabus_data = []
-            canvas_data = []
+            print(f"      Warning: syllabus download failed ({exc})")
+        except Exception as exc:
+            logger.warning("Canvas syllabus download failed: %s", exc)
+            print(f"      Warning: syllabus download failed ({exc})")
 
-    if not canvas_data and not syllabus_data:
-        logger.warning("No data retrieved from any source.")
-        print("      No assignments returned from Canvas or syllabi/.")
+    try:
+        canvas_data, syllabus_data, canvas_failed = fetch_all_data(
+            allow_partial=args.allow_partial or args.dry_run,
+            syllabus_only=args.syllabus_only,
+        )
+        if args.syllabus_only:
+            canvas_failed = True
+    except CanvasFetchError:
+        sys.exit(1)
 
-    print("      Sources fetched — running dedupe engine...")
+    sheet_degraded = canvas_failed
+
+    print("      Sources fetched â€” running dedupe engine...")
 
     # ------------------------------------------------------------------
     # 2. Google Sheets (--google) or local Excel dashboard
@@ -491,6 +525,7 @@ def main() -> None:
     logger.info("Step 2/4 — %s", "Google Sheets" if args.google else "Excel dashboard")
     df = None
     sheet_degraded = canvas_failed
+    failures: list[str] = []
     try:
         if args.google:
             if not google_sheets_ready():
@@ -525,7 +560,7 @@ def main() -> None:
         message = redact_text(exc)
         logger.error("Google Sheets export failed: %s", message)
         print(f"[ERROR] Google Sheets: {message}")
-        print("        Calendar and Discord will still run if they can. Existing rows were not cleared.")
+        print("        Calendar and Discord will still run if they can.")
         failures.append("Google Sheets")
         sheet_degraded = True
         try:
@@ -536,14 +571,12 @@ def main() -> None:
     except Exception as exc:  # noqa: BLE001
         target = "Google Sheets" if args.google else "Excel dashboard"
         message = redact_text(exc)
-        if isinstance(exc, OSError):
-            message = (
-                f"{message} If the workbook is open in Excel, or OneDrive is locking "
-                "the file, close it and re-run."
-            )
         logger.error("%s export failed: %s", target, message)
         print(f"[ERROR] {target} export failed: {message}")
-        failures.append(target)
+        if not args.dry_run:
+            failures.append(target)
+            if not args.allow_partial:
+                sys.exit(1)
         sheet_degraded = True
         try:
             df = _in_memory_frame(canvas_data, syllabus_data)
@@ -589,13 +622,15 @@ def main() -> None:
             except GoogleCalendarPermissionError as exc:
                 logger.error("Google Calendar permission error: %s", redact_text(exc))
                 print(f"[ERROR] Google Calendar: {redact_text(exc)}")
-                print("        Discord will still run if it was requested.")
                 failures.append("Google Calendar")
+                if not args.dry_run:
+                    sys.exit(1)
             except Exception as exc:  # noqa: BLE001
                 logger.error("Google Calendar sync failed: %s", redact_text(exc))
                 print(f"[ERROR] Google Calendar sync failed: {redact_text(exc)}")
-                print("        Discord will still run if it was requested.")
                 failures.append("Google Calendar")
+                if not args.dry_run:
+                    sys.exit(1)
     else:
         print("[3/4] Google Calendar sync... skipped (pass --calendar)")
 
@@ -626,19 +661,12 @@ def main() -> None:
                 logger.error("Discord digest failed: %s", redact_text(exc))
                 print(f"[ERROR] Discord digest failed: {redact_text(exc)}")
                 failures.append("Discord")
+                if not args.dry_run:
+                    sys.exit(1)
     else:
         print("[4/4] Discord weekly digest... skipped (pass --weekly)")
 
     elapsed = time.perf_counter() - started
-    if failures:
-        print(
-            f"\n[DONE WITH ERRORS] Finished in {elapsed:.1f} seconds. "
-            f"Failed stage(s): {', '.join(failures)}. "
-            "Earlier stages that succeeded were kept.\n"
-        )
-        logger.error("Sylla Sync finished with failures: %s", ", ".join(failures))
-        sys.exit(1)
-
     status = "DRY-RUN complete" if args.dry_run else "SUCCESS"
     print(f"\n[{status}] Pipeline finished in {elapsed:.1f} seconds!\n")
     logger.info("Sylla Sync complete in %.1f seconds (dry_run=%s).", elapsed, args.dry_run)

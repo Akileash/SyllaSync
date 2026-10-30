@@ -1,0 +1,10 @@
+{
+  "ignored": [
+    {
+      "task_id": "canvas_1001"
+    },
+    {
+      "task_id": "syllabus_phys_100_attendance_check_in"
+    }
+  ]
+}

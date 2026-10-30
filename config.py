@@ -17,8 +17,9 @@ from safe_text import clean_path
 BASE_DIR = Path(__file__).parent
 
 # utf-8-sig strips a BOM so the first key is not "\ufeffCANVAS_URL" on Windows.
-load_dotenv(BASE_DIR / ".env", encoding="utf-8-sig")
-load_dotenv(BASE_DIR / "local.env", override=True, encoding="utf-8-sig")
+if os.getenv("SYLLASYNC_SKIP_DOTENV", "").strip().lower() not in {"1", "true", "yes"}:
+    load_dotenv(BASE_DIR / ".env", encoding="utf-8-sig")
+    load_dotenv(BASE_DIR / "local.env", override=True, encoding="utf-8-sig")
 
 
 def _env_int(name: str, default: int) -> int:
@@ -54,6 +55,15 @@ CANVAS_PAST_DUE_DAYS = _env_int("CANVAS_PAST_DUE_DAYS", 21)
 
 # Alberta stays on UTC-6 from November 2026. Older tzdata still applies DST.
 MIN_TZDATA_VERSION = "2026.5"
+
+# Read Canvas announcements for exam dates (midterm/final) that only appear
+# there. Read-only; set CANVAS_READ_ANNOUNCEMENTS=0 to disable.
+CANVAS_READ_ANNOUNCEMENTS = os.getenv("CANVAS_READ_ANNOUNCEMENTS", "1").strip().lower() not in {
+    "0",
+    "false",
+    "no",
+    "off",
+}
 
 # Local timezone for Calendar timed events / Discord windows
 LOCAL_TIMEZONE = (os.getenv("LOCAL_TIMEZONE") or "America/Edmonton").strip()

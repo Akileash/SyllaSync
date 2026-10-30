@@ -567,7 +567,9 @@ def push_to_google_sheet(
     """
     prepared = df.copy()
     prepared.columns = prepared.columns.str.strip()
-    prepared = prepared.reindex(columns=COLUMNS).fillna("")
+    # Keep End Date so Calendar session events get their explicit end time
+    keep_extra = ["End Date"] if "End Date" in prepared.columns else []
+    prepared = prepared.reindex(columns=COLUMNS + keep_extra).fillna("")
     prepared[TASK_ID_COL] = prepared.apply(
         lambda row: ensure_task_id(row.to_dict()), axis=1
     )
