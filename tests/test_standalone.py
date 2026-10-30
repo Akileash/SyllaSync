@@ -528,3 +528,24 @@ def test_check_reports_missing_names_without_a_dotenv_file():
     assert result.returncode == 1
     assert "CANVAS_URL" in combined
     assert "CANVAS_TOKEN" in combined
+
+
+def test_export_to_google_sheet_dry_run_loads_sheet_read_only(monkeypatch):
+    import syllasync.cli as cli
+
+    seen = {}
+
+    def fake_load(*, dry_run=False):
+        seen["load_dry_run"] = dry_run
+        import pandas as pd
+
+        return pd.DataFrame()
+
+    def fake_push(canvas_data, syllabus_data, *, existing_df=None, dry_run=False):
+        seen["push_dry_run"] = dry_run
+        return existing_df
+
+    monkeypatch.setattr(cli, "load_from_google_sheet", fake_load)
+    monkeypatch.setattr(cli, "push_from_records", fake_push)
+    cli.export_to_google_sheet([], [], dry_run=True)
+    assert seen == {"load_dry_run": True, "push_dry_run": True}

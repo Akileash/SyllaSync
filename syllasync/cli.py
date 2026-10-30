@@ -338,7 +338,7 @@ def export_to_google_sheet(
     Returns:
         Prepared DataFrame written to Google Sheets.
     """
-    existing = load_from_google_sheet()
+    existing = load_from_google_sheet(dry_run=dry_run)
     logger.info("Loaded %d existing row(s) from Google Sheet for merge.", len(existing))
     return push_from_records(
         canvas_data, syllabus_data, existing_df=existing, dry_run=dry_run
