@@ -272,6 +272,8 @@ def _restrict_to_allowed_courses(frame: pd.DataFrame) -> pd.DataFrame:
 def _incoming_from_sources(
     canvas_data: list[dict[str, Any]],
     syllabus_data: list[dict[str, Any]],
+    *,
+    dry_run: bool = False,
 ):
     """
     Dedupe Canvas + syllabus, then map to tracker auto-fill columns.
@@ -279,7 +281,7 @@ def _incoming_from_sources(
     Returns:
         (incoming DataFrame with Task_ID, DedupStats)
     """
-    records, stats = dedupe_cross_source(canvas_data, syllabus_data)
+    records, stats = dedupe_cross_source(canvas_data, syllabus_data, dry_run=dry_run)
     frame = _drop_ignored_items(_restrict_to_allowed_courses(records_to_tracker_frame(records)))
     cols = AUTO_COLUMNS + ["Source"]
     return frame.reindex(columns=cols).fillna(""), stats
@@ -404,7 +406,12 @@ def apply_due_overrides(
     return out
 
 
-def _merge_tracker(existing: pd.DataFrame, incoming: pd.DataFrame) -> pd.DataFrame:
+def _merge_tracker(
+    existing: pd.DataFrame,
+    incoming: pd.DataFrame,
+    *,
+    dry_run: bool = False,
+) -> pd.DataFrame:
     """
     Merge synced data with the existing tracker.
 
@@ -579,7 +586,7 @@ def _merge_tracker(existing: pd.DataFrame, incoming: pd.DataFrame) -> pd.DataFra
     df = _collapse_by_match_key(df)
     df = apply_due_overrides(df)
     df = _sort_by_days_until_due(df)
-    remember_task_ids(df)
+    remember_task_ids(df, dry_run=dry_run)
     return df
 
 
@@ -727,6 +734,8 @@ def _write_tracker(path: Path, df: pd.DataFrame) -> None:
 def update_sheet(
     canvas_data: list[dict[str, Any]],
     syllabus_data: list[dict[str, Any]],
+    *,
+    dry_run: bool = False,
 ) -> pd.DataFrame:
     """
     Combine data sources, merge with existing tracker, and write Excel file.
@@ -736,7 +745,7 @@ def update_sheet(
     """
     output_path = Path(EXCEL_FILE_PATH)
     existing = _load_existing_tracker(output_path)
-    incoming, stats = _incoming_from_sources(canvas_data, syllabus_data)
+    incoming, stats = _incoming_from_sources(canvas_data, syllabus_data, dry_run=dry_run)
     from .dedupe_module import print_dedup_stats
 
     print_dedup_stats(stats)
@@ -744,7 +753,7 @@ def update_sheet(
     if incoming.empty and existing.empty:
         logger.warning("No assignment data to write.")
 
-    df = _merge_tracker(existing, incoming)
+    df = _merge_tracker(existing, incoming, dry_run=dry_run)
 
     try:
         _write_tracker(output_path, df)

@@ -294,14 +294,22 @@ def load_task_state() -> dict[str, Any]:
         return {"by_match_key": {}, "aliases": {}}
 
 
-def save_task_state(state: dict[str, Any]) -> None:
+def save_task_state(state: dict[str, Any], *, dry_run: bool = False) -> None:
+    if dry_run:
+        logger.debug("Skipping task state write (dry_run=True)")
+        return
     try:
         STATE_PATH.write_text(json.dumps(state, indent=2, sort_keys=True), encoding="utf-8")
     except OSError as exc:
         logger.warning("Could not write task state file: %s", exc)
 
 
-def hydrate_state_from_rows(rows: list[dict[str, Any]], state: dict[str, Any] | None = None) -> dict[str, Any]:
+def hydrate_state_from_rows(
+    rows: list[dict[str, Any]],
+    state: dict[str, Any] | None = None,
+    *,
+    dry_run: bool = False,
+) -> dict[str, Any]:
     """
     Rebuild local Task_ID map from Google Sheet / tracker rows.
 
@@ -328,7 +336,7 @@ def hydrate_state_from_rows(rows: list[dict[str, Any]], state: dict[str, Any] | 
             if val:
                 entry[col] = val
         by_key[key] = entry
-    save_task_state(state)
+    save_task_state(state, dry_run=dry_run)
     return state
 
 
@@ -370,7 +378,12 @@ def resolve_persisted_task_id(
     return saved or preferred
 
 
-def remember_task_ids(df: pd.DataFrame, state: dict[str, Any] | None = None) -> dict[str, Any]:
+def remember_task_ids(
+    df: pd.DataFrame,
+    state: dict[str, Any] | None = None,
+    *,
+    dry_run: bool = False,
+) -> dict[str, Any]:
     state = state or load_task_state()
     by_key: dict[str, Any] = state.setdefault("by_match_key", {})
 
@@ -395,7 +408,7 @@ def remember_task_ids(df: pd.DataFrame, state: dict[str, Any] | None = None) -> 
                 entry[col] = val
         by_key[key] = entry
 
-    save_task_state(state)
+    save_task_state(state, dry_run=dry_run)
     return state
 
 
@@ -451,6 +464,8 @@ def _drop_canvas_shell_copies(
 def dedupe_cross_source(
     canvas_data: list[dict[str, Any]],
     syllabus_data: list[dict[str, Any]],
+    *,
+    dry_run: bool = False,
 ) -> tuple[list[dict[str, Any]], DedupStats]:
     """Attach Task_IDs, promote syllabus→canvas, drop overlaps (Canvas wins)."""
     stats = DedupStats(canvas_count=len(canvas_data), syllabus_count=len(syllabus_data))
@@ -597,6 +612,7 @@ def dedupe_cross_source(
             ]
         ),
         state,
+        dry_run=dry_run,
     )
     return kept, stats
 

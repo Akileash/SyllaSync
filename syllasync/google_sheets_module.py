@@ -291,7 +291,7 @@ def _load_meta_task_map(spreadsheet: gspread.Spreadsheet) -> dict[str, str]:
     return mapping
 
 
-def load_from_google_sheet() -> pd.DataFrame:
+def load_from_google_sheet(*, dry_run: bool = False) -> pd.DataFrame:
     """
     Read existing Masterlist rows into Sylla Sync's internal DataFrame format.
 
@@ -339,7 +339,7 @@ def load_from_google_sheet() -> pd.DataFrame:
 
     # Rebuild local cache from sheet so wiped machines recover identity
     if records:
-        hydrate_state_from_rows(records, state)
+        hydrate_state_from_rows(records, state, dry_run=dry_run)
 
     if not records:
         return pd.DataFrame(columns=COLUMNS)
@@ -573,7 +573,7 @@ def push_to_google_sheet(
     prepared[TASK_ID_COL] = prepared.apply(
         lambda row: ensure_task_id(row.to_dict()), axis=1
     )
-    remember_task_ids(prepared)
+    remember_task_ids(prepared, dry_run=dry_run)
 
     try:
         client = _authenticate()
@@ -629,13 +629,13 @@ def push_from_records(
     Uses the dedupe engine (Canvas wins over syllabus) and preserves manual
     Status/Priority via Task_ID / fuzzy key matching.
     """
-    incoming, stats = incoming_from_sources(canvas_data, syllabus_data)
+    incoming, stats = incoming_from_sources(canvas_data, syllabus_data, dry_run=dry_run)
     print_dedup_stats(stats)
 
     if existing_df is None:
-        existing_df = load_from_google_sheet()
+        existing_df = load_from_google_sheet(dry_run=dry_run)
 
-    merged = merge_tracker(existing_df, incoming)
+    merged = merge_tracker(existing_df, incoming, dry_run=dry_run)
 
     if dry_run:
         diff = preview_sheets_diff(existing_df, merged)
