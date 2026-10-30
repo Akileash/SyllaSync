@@ -20,14 +20,21 @@ import gspread
 from dotenv import load_dotenv
 from gspread.exceptions import APIError, SpreadsheetNotFound
 
-from syllasync.config import warn_if_tzdata_old
-
 BASE_DIR = Path(__file__).resolve().parent.parent
+if str(BASE_DIR) not in sys.path:
+    sys.path.insert(0, str(BASE_DIR))
+
+from syllasync.config import (  # noqa: E402
+    _credentials_issues,
+    is_placeholder,
+    warn_if_tzdata_old,
+)
 CREDENTIALS_PATH = BASE_DIR / "credentials.json"
 
 # Load environment variables (.env first, then local.env override)
-load_dotenv(BASE_DIR / ".env")
-load_dotenv(BASE_DIR / "local.env", override=True)
+if os.getenv("SYLLASYNC_SKIP_DOTENV", "").strip().lower() not in {"1", "true", "yes"}:
+    load_dotenv(BASE_DIR / ".env")
+    load_dotenv(BASE_DIR / "local.env", override=True)
 
 GOOGLE_SHEET_ID = os.getenv("GOOGLE_SHEET_ID")
 SCOPES = [
@@ -51,10 +58,10 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     warn_if_tzdata_old()
-    if not GOOGLE_SHEET_ID:
+    if not GOOGLE_SHEET_ID or is_placeholder(GOOGLE_SHEET_ID):
         print(
-            "Error: GOOGLE_SHEET_ID is not set.\n"
-            "Add it to your .env or local.env file.",
+            "Error: GOOGLE_SHEET_ID is missing or still the example placeholder.\n"
+            "Set it in your .env or local.env file, then run: python main.py --check",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -65,6 +72,13 @@ def main() -> None:
             "Download your service account key from Google Cloud Console.",
             file=sys.stderr,
         )
+        sys.exit(1)
+
+    cred_errors = [i for i in _credentials_issues(required=True) if i.level == "error"]
+    if cred_errors:
+        for issue in cred_errors:
+            print(f"Error: {issue.message}", file=sys.stderr)
+        print("Fix credentials.json, then run: python main.py --check", file=sys.stderr)
         sys.exit(1)
 
     try:

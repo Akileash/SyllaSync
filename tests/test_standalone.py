@@ -487,8 +487,30 @@ def test_check_and_dry_run_with_dummy_config():
     dry_out = dry.stdout + dry.stderr
     assert dry.returncode == 0, dry_out
     assert "DRY-RUN complete" in dry_out
+    assert "Canvas skipped" in dry_out
+    assert "Traceback" not in dry_out
     assert "your_canvas_api_token" not in dry_out
     assert "your_webhook_token" not in dry_out
+
+
+def test_sheets_probe_rejects_placeholder_sheet_id_without_traceback():
+    env = _isolated_env()
+    env["GOOGLE_SHEET_ID"] = "your_google_sheet_id"
+    result = subprocess.run(
+        [sys.executable, str(ROOT / "scripts" / "test_sheets.py")],
+        cwd=ROOT,
+        env=env,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        capture_output=True,
+        check=False,
+    )
+    combined = result.stdout + result.stderr
+    assert result.returncode == 1
+    assert "Traceback" not in combined
+    assert "placeholder" in combined.lower()
+    assert "your_google_sheet_id" not in combined
 
 
 def test_check_reports_missing_names_without_a_dotenv_file():
