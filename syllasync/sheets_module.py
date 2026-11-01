@@ -22,6 +22,7 @@ from .date_utils import (
     split_title_and_due,
 )
 from .dedupe_module import (
+    GRADE_COLUMNS,
     TASK_ID_COL,
     dedupe_cross_source,
     fuzzy_match_key,
@@ -40,6 +41,8 @@ MANUAL_COLUMNS = [
     "Status",
     "Priority",
 ]
+# Canvas score columns — refreshed from the API on each sync (Masterlist K–M).
+GRADE_COLUMNS = list(GRADE_COLUMNS)
 # Task_ID is tracking-only; written to Excel but not required for display polish
 COLUMNS = [
     "Course",
@@ -50,6 +53,7 @@ COLUMNS = [
     "Priority",
     TASK_ID_COL,
     "Is Draft",
+    *GRADE_COLUMNS,
 ]
 
 TITLE = "Assessment Schedule"
@@ -198,6 +202,11 @@ def _collapse_by_match_key(df: pd.DataFrame) -> pd.DataFrame:
                 existing[col] = prefer_status(existing.get(col, ""), row.get(col, ""))
             elif col in df.columns and not str(existing.get(col, "")).strip():
                 existing[col] = row.get(col, "")
+        for col in GRADE_COLUMNS:
+            if col not in df.columns:
+                continue
+            if not str(existing.get(col, "")).strip() and str(row.get(col, "")).strip():
+                existing[col] = row.get(col, "")
         # Same COURSE 202 lab quiz from two labels/dates -> one item on the Monday.
         if "Due Date" in existing:
             existing["Due Date"] = apply_lab_monday_due(
@@ -283,7 +292,7 @@ def _incoming_from_sources(
     """
     records, stats = dedupe_cross_source(canvas_data, syllabus_data, dry_run=dry_run)
     frame = _drop_ignored_items(_restrict_to_allowed_courses(records_to_tracker_frame(records)))
-    cols = AUTO_COLUMNS + ["Source"]
+    cols = AUTO_COLUMNS + ["Source", "Status", *GRADE_COLUMNS]
     return frame.reindex(columns=cols).fillna(""), stats
 
 
@@ -422,9 +431,17 @@ def _merge_tracker(
     - Near-duplicate titles within the same course are collapsed.
     """
     existing = existing.reindex(columns=COLUMNS).fillna("")
-    extra_cols = [c for c in ("Source", "End Date") if c in incoming.columns]
+    extra_cols = [
+        c
+        for c in ("Source", "End Date", "Status", *GRADE_COLUMNS)
+        if c in incoming.columns
+    ]
     incoming = incoming.reindex(
-        columns=[c for c in AUTO_COLUMNS + extra_cols if c in incoming.columns or c in AUTO_COLUMNS]
+        columns=[
+            c
+            for c in AUTO_COLUMNS + extra_cols
+            if c in incoming.columns or c in AUTO_COLUMNS
+        ]
     ).fillna("")
     for col in AUTO_COLUMNS:
         if col not in incoming.columns:
@@ -456,6 +473,8 @@ def _merge_tracker(
 
     manual_by_key: dict[str, dict[str, Any]] = {}
     manual_by_task_id: dict[str, dict[str, Any]] = {}
+    grades_by_key: dict[str, dict[str, Any]] = {}
+    grades_by_task_id: dict[str, dict[str, Any]] = {}
     existing_title_by_key: dict[str, str] = {}
     existing_task_id_by_key: dict[str, str] = {}
     existing_due_by_key: dict[str, Any] = {}
@@ -472,12 +491,15 @@ def _merge_tracker(
         else:
             fuzzy_to_existing_canvas.setdefault(fkey, key)
         manual = {col: row.get(col, "") for col in MANUAL_COLUMNS}
+        grades = {col: row.get(col, "") for col in GRADE_COLUMNS}
         manual_by_key[key] = manual
+        grades_by_key[key] = grades
         existing_title_by_key[key] = str(row.get("Assessment title", ""))
         existing_due_by_key[key] = row.get("Due Date", "")
         task_id = str(row.get(TASK_ID_COL, "") or "").strip()
         if task_id:
             manual_by_task_id[task_id] = manual
+            grades_by_task_id[task_id] = grades
             existing_task_id_by_key[key] = task_id
 
     merged_rows: list[dict[str, Any]] = []
@@ -528,6 +550,10 @@ def _merge_tracker(
         due = apply_lab_monday_due(row["Course"], title, due)
         if _is_droppable_placeholder(title, due):
             continue
+        incoming_status = str(row.get("Status", "") or "").strip()
+        if incoming_status:
+            # Canvas turn-in / grade promotes to Submitted; equal ranks keep Sheet.
+            manual["Status"] = prefer_status(manual.get("Status", ""), incoming_status)
         merged = {
             "Course": row["Course"],
             "Assessment title": title,
@@ -542,6 +568,19 @@ def _merge_tracker(
         source = str(row.get("Source", "") or "").strip()
         if source:
             merged["Source"] = source
+        prior_grades = grades_by_task_id.get(task_id) or grades_by_key.get(key) or {}
+        if source.lower() == "canvas":
+            # Fresh Canvas fetch wins, including blanks (not yet graded).
+            for col in GRADE_COLUMNS:
+                merged[col] = row.get(col, "") if col in row.index else prior_grades.get(col, "")
+        else:
+            for col in GRADE_COLUMNS:
+                incoming_val = row.get(col, "") if col in row.index else ""
+                merged[col] = (
+                    incoming_val
+                    if str(incoming_val).strip()
+                    else prior_grades.get(col, "")
+                )
         merged_rows.append(merged)
 
     for _, row in existing.iterrows():

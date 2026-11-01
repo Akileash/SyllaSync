@@ -152,13 +152,128 @@ def _list_courses(canvas: Canvas):
 
 
 @with_retries(label="canvas.get_assignments")
-def _list_assignments(course):
+def _list_assignments_basic(course):
     return list(course.get_assignments(order_by="due_at"))
+
+
+@with_retries(label="canvas.get_assignments+submission")
+def _list_assignments_with_submissions(course):
+    # include=submission attaches the current user's submission (score/grade)
+    # so we avoid an N+1 get_submission call per assignment.
+    return list(course.get_assignments(order_by="due_at", include=["submission"]))
+
+
+def _list_assignments(course):
+    """Prefer submissions for grades; fall back if the include is rejected."""
+    try:
+        return _list_assignments_with_submissions(course)
+    except CanvasException as exc:
+        logger.warning(
+            "Canvas assignments+submission failed for course %s (%s); "
+            "retrying without submission grades.",
+            getattr(course, "id", "?"),
+            redact_text(exc),
+        )
+        return _list_assignments_basic(course)
 
 
 @with_retries(label="canvas.get_announcements")
 def _list_announcements(course):
     return list(course.get_discussion_topics(only_announcements=True))
+
+
+def _as_number(value: Any) -> float | None:
+    """Parse a Canvas score / points_possible value; blank → None."""
+    if value is None:
+        return None
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return float(value)
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        return float(text)
+    except ValueError:
+        return None
+
+
+def format_grade_percent(
+    points_earned: Any,
+    points_possible: Any,
+    canvas_grade: Any = None,
+) -> str:
+    """
+    Sheet GRADE cell: percentage when both scores exist, else Canvas grade text.
+
+    Examples: 90%, 87.5%, A-, 18 (fallback Canvas string).
+    """
+    earned = _as_number(points_earned)
+    possible = _as_number(points_possible)
+    if earned is not None and possible is not None and possible > 0:
+        pct = 100.0 * earned / possible
+        if abs(pct - round(pct)) < 1e-9:
+            return f"{int(round(pct))}%"
+        return f"{pct:.1f}%"
+    grade_text = str(canvas_grade or "").strip()
+    return grade_text
+
+
+def _submission_payload(assignment) -> Any:
+    """Return the embedded current-user submission object, if Canvas sent one."""
+    submission = getattr(assignment, "submission", None)
+    if submission is None:
+        return None
+    # canvasapi may leave a dict when include[]=submission is used
+    if isinstance(submission, list):
+        return submission[0] if submission else None
+    return submission
+
+
+def _submission_attr(submission: Any, name: str, default: Any = None) -> Any:
+    if submission is None:
+        return default
+    if isinstance(submission, dict):
+        return submission.get(name, default)
+    return getattr(submission, name, default)
+
+
+def submission_indicates_submitted(submission: Any) -> bool:
+    """True when Canvas shows the work turned in and/or graded."""
+    if submission is None:
+        return False
+    workflow = str(_submission_attr(submission, "workflow_state", "") or "").lower()
+    if workflow in {"submitted", "graded", "pending_review"}:
+        return True
+    if _as_number(_submission_attr(submission, "score")) is not None:
+        return True
+    if _submission_attr(submission, "submitted_at"):
+        return True
+    if _submission_attr(submission, "graded_at") and workflow != "unsubmitted":
+        return True
+    return False
+
+
+def extract_assignment_grades(assignment) -> dict[str, Any]:
+    """
+    Pull POINTS EARNED / POSSIBLE / GRADE (+ Submitted hint) from one assignment.
+
+    Status is always the Sheet label "Submitted" when Canvas shows a turn-in
+    or grade — never "Graded".
+    """
+    points_possible = _as_number(getattr(assignment, "points_possible", None))
+    submission = _submission_payload(assignment)
+    points_earned = _as_number(_submission_attr(submission, "score"))
+    canvas_grade = _submission_attr(submission, "grade")
+    grade = format_grade_percent(points_earned, points_possible, canvas_grade)
+
+    out: dict[str, Any] = {
+        "Points Earned": "" if points_earned is None else points_earned,
+        "Points Possible": "" if points_possible is None else points_possible,
+        "Grade": grade,
+    }
+    if submission_indicates_submitted(submission):
+        out["Status"] = "Submitted"
+    return out
 
 
 def is_stale_year_due(due_formatted: Any, term_year: int | None = None) -> bool:
@@ -259,16 +374,16 @@ def fetch_canvas_assignments(
             due_formatted = apply_lab_monday_due(
                 course_name, clean_title, due_formatted
             )
-            assignments.append(
-                {
-                    "Source": "Canvas",
-                    "Course": course_name,
-                    "Task": clean_title,
-                    "Due Date": due_formatted,
-                    "Canvas ID": getattr(assignment, "id", None),
-                    "assignment_id": getattr(assignment, "id", None),
-                }
-            )
+            row: dict[str, Any] = {
+                "Source": "Canvas",
+                "Course": course_name,
+                "Task": clean_title,
+                "Due Date": due_formatted,
+                "Canvas ID": getattr(assignment, "id", None),
+                "assignment_id": getattr(assignment, "id", None),
+            }
+            row.update(extract_assignment_grades(assignment))
+            assignments.append(row)
 
     logger.info("Fetched %d Canvas assignment(s) (lookback=%dd).", len(assignments), lookback)
     if STALE_YEAR_WARNINGS:

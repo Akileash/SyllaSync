@@ -35,6 +35,7 @@ logger = logging.getLogger(__name__)
 
 STATE_PATH = BASE_DIR / ".syllasync_task_state.json"
 TASK_ID_COL = "Task_ID"
+GRADE_COLUMNS = ("Points Earned", "Points Possible", "Grade")
 
 NUMBERED_TASK_RE = re.compile(
     r"^(assignment|assign|assn|a|quiz|exam|lab|homework|hw|project|midterm|final|ps|problem\s*set)"
@@ -512,6 +513,12 @@ def dedupe_cross_source(
             TASK_ID_COL: task_id,
             "Is Draft": False,
         }
+        for col in GRADE_COLUMNS:
+            if col in item:
+                row[col] = item.get(col, "")
+        status = str(item.get("Status", "") or "").strip()
+        if status:
+            row["Status"] = status
         kept.append(row)
         canvas_index.append(row)
 
@@ -618,8 +625,9 @@ def dedupe_cross_source(
 
 
 def records_to_tracker_frame(records: list[dict[str, Any]]) -> pd.DataFrame:
-    rows = [
-        {
+    rows = []
+    for r in records:
+        row = {
             "Course": r.get("Course", ""),
             "Assessment title": r.get("Task", ""),
             "Due Date": r.get("Due Date", ""),
@@ -628,9 +636,24 @@ def records_to_tracker_frame(records: list[dict[str, Any]]) -> pd.DataFrame:
             "Is Draft": bool(r.get("Is Draft", False)),
             "End Date": str(r.get("End Date", "") or ""),
         }
-        for r in records
+        for col in GRADE_COLUMNS:
+            if col in r:
+                row[col] = r.get(col, "")
+        status = str(r.get("Status", "") or "").strip()
+        if status:
+            row["Status"] = status
+        rows.append(row)
+    cols = [
+        "Course",
+        "Assessment title",
+        "Due Date",
+        TASK_ID_COL,
+        "Source",
+        "Is Draft",
+        "End Date",
+        *GRADE_COLUMNS,
+        "Status",
     ]
-    cols = ["Course", "Assessment title", "Due Date", TASK_ID_COL, "Source", "Is Draft", "End Date"]
     return pd.DataFrame(rows, columns=cols)
 
 

@@ -1,0 +1,9 @@
+﻿# Secrets — block from Agent / Tab / @ mentions.
+# Note: terminal commands can still read these; keep command approval on.
+.env
+.env.*
+local.env
+credentials.json
+**/credentials.json
+*.pem
+*.key
