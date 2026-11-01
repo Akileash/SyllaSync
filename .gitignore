@@ -62,3 +62,7 @@ ignored_items.json
 syllasync_daily.cmd
 logs/
 
+
+# Editor / agent local config
+.cursor/
+
