@@ -10,7 +10,8 @@ One Windows CLI that pulls work from Canvas and syllabus PDFs, keeps a Google Sh
 ## What it does
 
 - Pulls assignments from the Canvas API and parses syllabus / schedule PDFs (built-in parsers, with optional Google Gemini for tougher PDFs)
-- Merges everything into a Google Sheet **Masterlist** tracker (columns A–H; template formulas past H are left alone)
+- Merges everything into a Google Sheet **Masterlist** tracker (columns A–H for due work; K–M for Points Earned / Points Possible / Grade from Canvas; I–J formulas/checkboxes left alone)
+- Fills Canvas scores into **POINTS EARNED**, **POINTS POSSIBLE**, and **GRADE** (percentage when both scores exist), and sets status to **Submitted** when Canvas shows a turn-in or grade
 - Upserts due dates as Google Calendar events, including a safe delete path that only removes SyllaSync-owned events after a full successful fetch
 - Optionally posts a Discord webhook digest of work due in the next week
 - Supports `--dry-run` to preview without writing, and `--check` to validate config without calling any service
@@ -207,7 +208,9 @@ Sheet / Excel statuses used by the pipeline:
 | Graded | Accepted on the Sheet dropdown; kept if you typed it |
 | Cancelled | Dropped / cancelled |
 
-When the pipeline **assigns** a status, `Graded`, `Done`, `Complete`, and `Completed` all map to **Submitted**. The write path never emits the word `Complete`. If the Sheet already has a finished label at the same rank (including typed `Graded`), that cell wins over a synced value. Submitted calendar events use the title prefix `[SUBMITTED] `.
+When the pipeline **assigns** a status, `Graded`, `Done`, `Complete`, and `Completed` all map to **Submitted**. The write path never emits the word `Complete`. If Canvas shows the work submitted or graded, status is promoted to **Submitted** (not a separate Graded label). If the Sheet already has a finished label at the same rank (including typed `Graded`), that cell wins over a synced value. Submitted calendar events use the title prefix `[SUBMITTED] `.
+
+Canvas scores land in Masterlist columns **K–M** only (not on Calendar). **GRADE** is `earned/possible` as a percent when both values exist; otherwise Canvas’s grade string is used when present.
 
 ## Commands
 

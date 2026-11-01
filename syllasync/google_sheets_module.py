@@ -6,8 +6,9 @@ Requires:
   - credentials.json service-account key in the project root
   - Sheet shared with the service account email (Editor access)
 
-Integration targets the **Masterlist** tab. Columns I onward (formulas,
-charts, calendars) are never modified. Column A stores Sylla Sync Task_ID.
+Integration targets the **Masterlist** tab. Columns A–H hold tracker fields;
+K–M hold Canvas Points Earned / Points Possible / Grade. Columns I–J
+(formulas / checkboxes) are never modified. Column A stores Sylla Sync Task_ID.
 A companion SyllaSync_Meta sheet mirrors Task_ID for cross-machine hydration.
 """
 
@@ -31,6 +32,7 @@ from .date_utils import (
     split_title_and_due,
 )
 from .dedupe_module import (
+    GRADE_COLUMNS,
     TASK_ID_COL,
     ensure_task_id,
     hydrate_state_from_rows,
@@ -57,7 +59,7 @@ DISPLAY_COLUMNS = [
     "Status",
     "Priority",
 ]
-COLUMNS = DISPLAY_COLUMNS + [TASK_ID_COL, "Is Draft"]
+COLUMNS = DISPLAY_COLUMNS + [TASK_ID_COL, "Is Draft", *GRADE_COLUMNS]
 
 # HHS Assignment Tracker — Masterlist layout
 MASTERLIST_SHEET = "Masterlist"
@@ -73,6 +75,10 @@ COL_DUE_TIME = 5  # E
 COL_CLASS = 6  # F
 COL_TYPE = 7  # G
 COL_ASSIGNMENT = 8  # H
+# I = DAYS UNTIL DUE (formula), J = TO DO LIST (checkbox) — never written
+COL_POINTS_EARNED = 11  # K
+COL_POINTS_POSSIBLE = 12  # L
+COL_GRADE = 13  # M
 
 CREDENTIALS_PATH = BASE_DIR / "credentials.json"
 SCOPES = [
@@ -189,9 +195,43 @@ def _split_due_datetime(due_value: Any) -> tuple[str, str]:
     return format_sheet_date(due_value), format_sheet_time(due_value)
 
 
+def _cell_str(cells: list[Any], col_1based: int) -> str:
+    idx = col_1based - 1
+    if idx < 0 or idx >= len(cells):
+        return ""
+    return str(cells[idx]).strip()
+
+
+def _format_points_cell(value: Any) -> Any:
+    """Write numeric points as numbers when possible; leave blanks empty."""
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return ""
+    if isinstance(value, (int, float)):
+        return value if value != int(value) else int(value)
+    text = str(value).strip()
+    if not text:
+        return ""
+    try:
+        number = float(text)
+    except ValueError:
+        return text
+    return number if number != int(number) else int(number)
+
+
+def _grade_values(record: dict[str, Any]) -> list[Any]:
+    """Masterlist K–M: Points Earned, Points Possible, Grade."""
+    return [
+        _format_points_cell(record.get("Points Earned", "")),
+        _format_points_cell(record.get("Points Possible", "")),
+        str(record.get("Grade", "") or "").strip(),
+    ]
+
+
 def _row_to_internal(row_values: list[Any], row_number: int) -> dict[str, Any] | None:
     """Convert a Masterlist row into Sylla Sync's internal column format."""
-    cells = list(row_values) + [""] * max(0, 8 - len(row_values))
+    cells = list(row_values) + [""] * max(0, COL_GRADE - len(row_values))
 
     course = str(cells[COL_CLASS - 1]).strip()
     title = str(cells[COL_ASSIGNMENT - 1]).strip()
@@ -231,6 +271,9 @@ def _row_to_internal(row_values: list[Any], row_number: int) -> dict[str, Any] |
         "Priority": "",
         TASK_ID_COL: str(cells[COL_TASK_ID - 1]).strip() if cells else "",
         "Is Draft": False,
+        "Points Earned": _cell_str(cells, COL_POINTS_EARNED),
+        "Points Possible": _cell_str(cells, COL_POINTS_POSSIBLE),
+        "Grade": _cell_str(cells, COL_GRADE),
     }
 
 
@@ -239,8 +282,9 @@ def _internal_to_masterlist_row(record: dict[str, Any]) -> list[Any] | None:
     Convert an internal record to Masterlist columns A–H (Task_ID + B–H).
 
     Column C = visible DUE DATE, column D = same calendar date for the
-    template's DAYS UNTIL DUE formula (I+). They are intentionally identical.
+    template's DAYS UNTIL DUE formula (I). They are intentionally identical.
     Column E holds the time (e.g. 11:45 PM) when present.
+    Grade cells (K–M) are written separately via _grade_values.
     """
     title = str(record.get("Assessment title", "") or "")
     due_raw = record.get("Due Date", "")
@@ -445,9 +489,9 @@ def _write_masterlist_rows(
     dry_run: bool = False,
 ) -> int:
     """
-    Write merged data to Masterlist columns A–H.
+    Write merged data to Masterlist columns A–H and grade columns K–M.
     Active rows are ordered soonest-due first; Submitted and other finished rows sink to the bottom.
-    Formula columns (I+) are left untouched.
+    Formula / checkbox columns (I–J) are left untouched.
     """
     if merged_df.empty:
         logger.warning("No assignment data to write to Masterlist.")
@@ -457,6 +501,7 @@ def _write_masterlist_rows(
 
     updates: list[dict[str, Any]] = []
     written = 0
+    graded_rows = 0
 
     for record in sorted_df.to_dict(orient="records"):
         key = normalize_key(record["Course"], record["Assessment title"])
@@ -467,10 +512,19 @@ def _write_masterlist_rows(
         row_values = _internal_to_masterlist_row(record)
         if row_values is None:
             continue
+        grade_values = _grade_values(record)
+        if any(str(v).strip() for v in grade_values):
+            graded_rows += 1
         updates.append(
             {
                 "range": f"A{target_row}:H{target_row}",
                 "values": [row_values],
+            }
+        )
+        updates.append(
+            {
+                "range": f"K{target_row}:M{target_row}",
+                "values": [grade_values],
             }
         )
         written += 1
@@ -483,6 +537,12 @@ def _write_masterlist_rows(
                 "values": [[""] * 8],
             }
         )
+        updates.append(
+            {
+                "range": f"K{row_number}:M{row_number}",
+                "values": [[""] * 3],
+            }
+        )
 
     occupied = {row for rows in existing_rows.values() for row in rows}
     for row_number in occupied:
@@ -493,6 +553,12 @@ def _write_masterlist_rows(
                     "values": [[""] * 8],
                 }
             )
+            updates.append(
+                {
+                    "range": f"K{row_number}:M{row_number}",
+                    "values": [[""] * 3],
+                }
+            )
 
     by_range: dict[str, dict[str, Any]] = {}
     for item in updates:
@@ -500,8 +566,15 @@ def _write_masterlist_rows(
     updates = list(by_range.values())
 
     if dry_run:
-        logger.info("[dry-run] Would write %d Masterlist row(s) (A-H).", written)
-        print(f"      [dry-run] Would write {written} Masterlist row(s).")
+        logger.info(
+            "[dry-run] Would write %d Masterlist row(s) (A-H, K-M); %d with grades.",
+            written,
+            graded_rows,
+        )
+        print(
+            f"      [dry-run] Would write {written} Masterlist row(s) "
+            f"({graded_rows} with grades)."
+        )
         return written
 
     if updates:
@@ -512,12 +585,14 @@ def _write_masterlist_rows(
             worksheet, DATA_START_ROW, DATA_START_ROW + written - 1
         )
         logger.info(
-            "Masterlist rewritten (active soonest-first; submitted at bottom) (%d row(s)).",
+            "Masterlist rewritten (active soonest-first; submitted at bottom) "
+            "(%d row(s), %d with grades).",
             written,
+            graded_rows,
         )
         print(
             f"      Sorted Masterlist: active soonest-first, "
-            f"submitted at bottom ({written} row(s))."
+            f"submitted at bottom ({written} row(s), {graded_rows} with grades)."
         )
 
     return written
@@ -563,7 +638,8 @@ def push_to_google_sheet(
     """
     Merge and push a DataFrame to the Masterlist worksheet.
 
-    Writes columns A–H (Task_ID in A). Formula columns (I+) are preserved.
+    Writes columns A–H (Task_ID in A) and grade columns K–M.
+    Formula / checkbox columns (I–J) are preserved.
     """
     prepared = df.copy()
     prepared.columns = prepared.columns.str.strip()
@@ -591,7 +667,7 @@ def push_to_google_sheet(
         _write_meta_sheet(spreadsheet, prepared, dry_run=dry_run)
 
         logger.info(
-            "%s %d row(s) to '%s' / '%s' (columns A-H).",
+            "%s %d row(s) to '%s' / '%s' (columns A-H, K-M).",
             "Would sync" if dry_run else "Synced",
             written,
             spreadsheet.title,

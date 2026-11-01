@@ -141,6 +141,120 @@ def test_merge_keeps_typed_graded_over_synced_submitted(tmp_path, monkeypatch):
     assert merged.iloc[0]["Status"] == "Graded"
 
 
+def test_format_grade_percent():
+    from syllasync.canvas_module import format_grade_percent
+
+    assert format_grade_percent(18, 20) == "90%"
+    assert format_grade_percent(17.5, 20) == "87.5%"
+    assert format_grade_percent(0, 10) == "0%"
+    assert format_grade_percent(None, 20, "A-") == "A-"
+    assert format_grade_percent(None, None) == ""
+
+
+def test_extract_assignment_grades_sets_submitted():
+    from types import SimpleNamespace
+
+    from syllasync.canvas_module import extract_assignment_grades
+
+    assignment = SimpleNamespace(
+        points_possible=20,
+        submission=SimpleNamespace(
+            score=18,
+            grade="18",
+            workflow_state="graded",
+            submitted_at="2026-10-01T12:00:00Z",
+            graded_at="2026-10-02T12:00:00Z",
+        ),
+    )
+    grades = extract_assignment_grades(assignment)
+    assert grades["Points Earned"] == 18.0
+    assert grades["Points Possible"] == 20.0
+    assert grades["Grade"] == "90%"
+    assert grades["Status"] == "Submitted"
+
+    ungraded = SimpleNamespace(
+        points_possible=10,
+        submission=SimpleNamespace(
+            score=None,
+            grade=None,
+            workflow_state="unsubmitted",
+            submitted_at=None,
+            graded_at=None,
+        ),
+    )
+    empty = extract_assignment_grades(ungraded)
+    assert empty["Points Earned"] == ""
+    assert empty["Points Possible"] == 10.0
+    assert empty["Grade"] == ""
+    assert "Status" not in empty
+
+
+def test_merge_canvas_grades_and_submitted_status(tmp_path, monkeypatch):
+    import pandas as pd
+
+    from syllasync.dedupe_module import TASK_ID_COL
+    from syllasync.sheets_module import merge_tracker
+
+    monkeypatch.setattr("syllasync.dedupe_module.STATE_PATH", tmp_path / "state.json")
+    existing = pd.DataFrame(
+        [
+            {
+                "Course": "COURSE 101",
+                "Assessment title": "HW1",
+                "Due Date": "2026-10-01",
+                "Estimated time dedicated to task": "",
+                "Status": "Not Started",
+                "Priority": "",
+                TASK_ID_COL: "canvas_1",
+                "Is Draft": False,
+                "Points Earned": "",
+                "Points Possible": "",
+                "Grade": "",
+            }
+        ]
+    )
+    incoming = pd.DataFrame(
+        [
+            {
+                "Course": "COURSE 101",
+                "Assessment title": "HW1",
+                "Due Date": "2026-10-01",
+                TASK_ID_COL: "canvas_1",
+                "Is Draft": False,
+                "Status": "Submitted",
+                "Source": "Canvas",
+                "Points Earned": 18,
+                "Points Possible": 20,
+                "Grade": "90%",
+            }
+        ]
+    )
+    merged = merge_tracker(existing, incoming)
+    assert merged.iloc[0]["Status"] == "Submitted"
+    assert merged.iloc[0]["Points Earned"] == 18
+    assert merged.iloc[0]["Points Possible"] == 20
+    assert merged.iloc[0]["Grade"] == "90%"
+
+
+def test_masterlist_grade_cells_km():
+    from syllasync.google_sheets_module import _grade_values, _internal_to_masterlist_row
+
+    record = {
+        "Course": "COURSE 101",
+        "Assessment title": "HW1",
+        "Due Date": "2026-10-01 17:00",
+        "Status": "Submitted",
+        "Task_ID": "canvas_1",
+        "Points Earned": 18,
+        "Points Possible": 20,
+        "Grade": "90%",
+    }
+    row = _internal_to_masterlist_row(record)
+    assert row is not None
+    assert row[1] == "Submitted"
+    assert _grade_values(record) == [18, 20, "90%"]
+
+
 def test_tzdata_age_check():
     from syllasync.config import MIN_TZDATA_VERSION, tzdata_is_old
 
