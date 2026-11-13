@@ -342,29 +342,32 @@ def fetch_canvas_assignments(
             if getattr(assignment, "published", True) is False:
                 continue
             due_at = getattr(assignment, "due_at", None)
+            assignment_name = getattr(assignment, "name", "Untitled Assignment")
             if due_at and is_stale_year_due(_format_due_date(due_at)):
                 # Surface, do not silently drop or auto-convert to this year.
-                logger.warning(
-                    "stale-year due date: %s '%s' (Canvas id %s) due_at=%s is before "
-                    "term year %d - not converted; check Canvas/announcements for the "
-                    "current date.",
-                    course_name,
-                    getattr(assignment, "name", "?"),
-                    getattr(assignment, "id", "?"),
-                    due_at,
-                    TERM_YEAR,
-                )
-                STALE_YEAR_WARNINGS.append(
-                    {
-                        "Course": course_name,
-                        "Task": getattr(assignment, "name", ""),
-                        "Canvas ID": getattr(assignment, "id", None),
-                        "due_at": due_at,
-                        "term_year": TERM_YEAR,
-                    }
-                )
+                # A due_overrides.json pin is the conversion; skip the warning then.
+                if not _has_due_override(course_name, assignment_name):
+                    logger.warning(
+                        "stale-year due date: %s '%s' (Canvas id %s) due_at=%s is before "
+                        "term year %d - not converted; check Canvas/announcements for the "
+                        "current date.",
+                        course_name,
+                        assignment_name or "?",
+                        getattr(assignment, "id", "?"),
+                        due_at,
+                        TERM_YEAR,
+                    )
+                    STALE_YEAR_WARNINGS.append(
+                        {
+                            "Course": course_name,
+                            "Task": assignment_name,
+                            "Canvas ID": getattr(assignment, "id", None),
+                            "due_at": due_at,
+                            "term_year": TERM_YEAR,
+                        }
+                    )
             if not _within_window(due_at, lookback) and not _has_due_override(
-                course_name, getattr(assignment, "name", "")
+                course_name, assignment_name
             ):
                 continue
             raw_title = getattr(assignment, "name", "Untitled Assignment")
