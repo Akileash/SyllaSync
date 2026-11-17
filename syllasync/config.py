@@ -83,10 +83,14 @@ def infer_term_year(today: date | None = None) -> int:
         return int(str(override).strip())
     if override and str(override).strip():
         print(
-            "Warning: TERM_YEAR must be a 4-digit year; using the current year. "
+            "Warning: TERM_YEAR must be a 4-digit year; using the inferred term year. "
             "The value was not logged.",
             file=sys.stderr,
         )
+    # Fall (Aug-Dec) is the current calendar year. Jan-Jul belongs to the
+    # academic year that started the previous August.
+    if today.month <= 7:
+        return today.year - 1
     return today.year
 
 

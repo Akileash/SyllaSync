@@ -81,9 +81,9 @@ COL_POINTS_POSSIBLE = 12  # L
 COL_GRADE = 13  # M
 
 CREDENTIALS_PATH = BASE_DIR / "credentials.json"
+# open_by_key talks to the Sheets API only; the full Drive scope is not needed.
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
-    "https://www.googleapis.com/auth/drive",
 ]
 
 # Infer assignment TYPE (column G) from the title
