@@ -1079,6 +1079,43 @@ def test_prompt_states_term_year():
     assert "Fall 2026" in prompt and "2027" in prompt
 
 
+def test_infer_term_year_jan_and_jul_use_previous_year(monkeypatch):
+    from datetime import date
+
+    from syllasync.config import infer_term_year
+
+    monkeypatch.delenv("TERM_YEAR", raising=False)
+    assert infer_term_year(date(2026, 1, 1)) == 2025
+    assert infer_term_year(date(2026, 7, 31)) == 2025
+
+
+def test_infer_term_year_aug_and_dec_use_current_year(monkeypatch):
+    from datetime import date
+
+    from syllasync.config import infer_term_year
+
+    monkeypatch.delenv("TERM_YEAR", raising=False)
+    assert infer_term_year(date(2026, 8, 1)) == 2026
+    assert infer_term_year(date(2026, 12, 31)) == 2026
+
+
+def test_infer_term_year_override_wins(monkeypatch):
+    from datetime import date
+
+    from syllasync.config import infer_term_year
+
+    monkeypatch.setenv("TERM_YEAR", "2024")
+    assert infer_term_year(date(2026, 1, 15)) == 2024
+    assert infer_term_year(date(2026, 11, 17)) == 2024
+
+
+def test_sheets_scopes_are_spreadsheets_only():
+    from syllasync.google_sheets_module import SCOPES
+
+    assert SCOPES == ["https://www.googleapis.com/auth/spreadsheets"]
+    assert "https://www.googleapis.com/auth/drive" not in SCOPES
+
+
 # --- Advanced Seminar alias / COURSE 202 lab quiz dedupe ---
 from syllasync.course_utils import normalize_course_code as _ncc
 from syllasync.date_utils import apply_lab_monday_due as _m209
