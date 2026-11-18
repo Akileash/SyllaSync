@@ -110,6 +110,14 @@ def parse_args() -> argparse.Namespace:
     )
 
     parser.add_argument(
+        "--setup",
+        action="store_true",
+        help=(
+            "Interactive first-run setup: write .env from prompts. "
+            "Does not print secret values or change credentials.json."
+        ),
+    )
+    parser.add_argument(
         "--check",
         "--validate",
         action="store_true",
@@ -403,6 +411,11 @@ def calendar_prune_enabled(*, canvas_failed: bool, sheet_degraded: bool) -> bool
 def main() -> None:
     configure_stdio()
     args = apply_all_flag(parse_args())
+
+    if args.setup:
+        from .setup_wizard import run_setup
+
+        raise SystemExit(run_setup(Path(__file__).resolve().parent.parent))
 
     # Early schedule dispatch: install/uninstall exit; daemon loops.
     if args.install_schedule or args.uninstall_schedule or args.daemon:
