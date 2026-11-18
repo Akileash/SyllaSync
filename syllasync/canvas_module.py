@@ -16,6 +16,7 @@ from .config import (
     CANVAS_READ_ANNOUNCEMENTS,
     CANVAS_TOKEN,
     CANVAS_URL,
+    SYNC_GRADES,
     TERM_YEAR,
 )
 from .course_utils import course_matches_allowed, normalize_course_code, parse_allowed_courses
@@ -165,6 +166,8 @@ def _list_assignments_with_submissions(course):
 
 def _list_assignments(course):
     """Prefer submissions for grades; fall back if the include is rejected."""
+    if not SYNC_GRADES:
+        return _list_assignments_basic(course)
     try:
         return _list_assignments_with_submissions(course)
     except CanvasException as exc:
@@ -307,6 +310,11 @@ def fetch_canvas_assignments(
         raise CanvasFetchError("CANVAS_URL and CANVAS_TOKEN must be set in .env")
 
     lookback = CANVAS_PAST_DUE_DAYS if lookback_days is None else lookback_days
+    if not SYNC_GRADES:
+        logger.info(
+            "SYNC_GRADES is off; skipping Canvas grade fetch. "
+            "Existing Sheet grade columns will be left as they are."
+        )
     assignments: list[dict[str, Any]] = []
     allowed_courses = parse_allowed_courses(ALLOWED_COURSES)
     schedule = load_schedule() if enforce_schedule else {"sections": []}
@@ -385,7 +393,8 @@ def fetch_canvas_assignments(
                 "Canvas ID": getattr(assignment, "id", None),
                 "assignment_id": getattr(assignment, "id", None),
             }
-            row.update(extract_assignment_grades(assignment))
+            if SYNC_GRADES:
+                row.update(extract_assignment_grades(assignment))
             assignments.append(row)
 
     logger.info("Fetched %d Canvas assignment(s) (lookback=%dd).", len(assignments), lookback)

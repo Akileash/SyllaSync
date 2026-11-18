@@ -20,7 +20,7 @@ Edit `.env` (UTF-8). Never commit real values.
 
 Required for `--all`: `CANVAS_URL`, `CANVAS_TOKEN`, `GOOGLE_SHEET_ID`, `GOOGLE_CALENDAR_ID`, `DISCORD_WEBHOOK_URL`
 
-Optional: `GEMINI_API_KEY`, `GEMINI_MODEL`, `ALLOWED_COURSES`, `LOCAL_TIMEZONE`, `TERM_YEAR`, `CANVAS_PAST_DUE_DAYS`, `EXCEL_FILE_PATH`
+Optional: `GEMINI_API_KEY`, `GEMINI_MODEL`, `ALLOWED_COURSES`, `LOCAL_TIMEZONE`, `TERM_YEAR`, `CANVAS_PAST_DUE_DAYS`, `EXCEL_FILE_PATH`, `SYNC_GRADES`
 
 `local.env` overrides `.env`. Fill sections in `schedule.json`.
 
@@ -40,6 +40,12 @@ python main.py --all
 ```
 
 `--all` writes Sheet, Calendar, and Discord. `--dry-run` previews creates/updates/deletes and writes nothing.
+
+## Privacy
+
+`--all` sends assignment titles and due dates to your Google Sheet and Calendar. Canvas grades go in Sheet columns K-M unless you set `SYNC_GRADES=0` (default is on, so nothing changes if you leave it). If `DISCORD_WEBHOOK_URL` is set, the weekly digest posts upcoming course, title, due date, and priority to that webhook. If `GEMINI_API_KEY` is set, extracted syllabus text is sent to Gemini; leave it unset to parse locally.
+
+Secrets stay in `.env`, `local.env`, and `credentials.json` on this machine. Those files are gitignored. `--check` and the logs print variable names only, never the values. You can set the same names as environment variables instead of putting them in a file (`.env` will not overwrite ones already set).
 
 ## Optional local JSON
 

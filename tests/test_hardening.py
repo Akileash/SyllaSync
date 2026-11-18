@@ -1044,6 +1044,57 @@ def test_stale_year_canvas_due_with_override_is_not_warned(monkeypatch, caplog):
     assert midterm and str(midterm[0]["Due Date"]).startswith("2025-10-30")
 
 
+def test_sync_grades_off_skips_submission_include_and_grade_fields(monkeypatch):
+    from types import SimpleNamespace
+
+    import syllasync.canvas_module as canvas_module
+
+    class RecordingCourse(_FakeCourse):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.assignment_calls = []
+
+        def get_assignments(self, **kwargs):
+            self.assignment_calls.append(kwargs)
+            return list(self._assignments)
+
+    assignment = _FakeAssignment(1001, "HW1", "2026-11-20T23:59:00Z")
+    assignment.points_possible = 20
+    assignment.submission = SimpleNamespace(
+        score=18,
+        grade="18",
+        workflow_state="graded",
+        submitted_at="2026-11-01T12:00:00Z",
+        graded_at="2026-11-02T12:00:00Z",
+    )
+    course = RecordingCourse(1, "COURSE 101", assignments=[assignment])
+    monkeypatch.setattr(canvas_module, "Canvas", lambda url, token: _FakeCanvas([course]))
+    monkeypatch.setattr(canvas_module, "CANVAS_URL", "https://canvas.example")
+    monkeypatch.setattr(canvas_module, "CANVAS_TOKEN", "fake")
+    monkeypatch.setattr(canvas_module, "ALLOWED_COURSES", "COURSE 101")
+    monkeypatch.setattr(canvas_module, "SYNC_GRADES", False)
+
+    rows = canvas_module.fetch_canvas_assignments(lookback_days=100000, enforce_schedule=False)
+
+    assert course.assignment_calls, "expected Canvas get_assignments to be called"
+    for kwargs in course.assignment_calls:
+        include = kwargs.get("include") or []
+        assert "submission" not in include
+    assert len(rows) == 1
+    assert "Grade" not in rows[0]
+    assert "Points Earned" not in rows[0]
+    assert "Points Possible" not in rows[0]
+    assert rows[0].get("Status") != "Submitted"
+
+    monkeypatch.setattr(canvas_module, "SYNC_GRADES", True)
+    course.assignment_calls = []
+    rows_on = canvas_module.fetch_canvas_assignments(lookback_days=100000, enforce_schedule=False)
+    assert any("submission" in (kwargs.get("include") or []) for kwargs in course.assignment_calls)
+    assert rows_on[0]["Grade"] == "90%"
+    assert rows_on[0]["Points Earned"] == 18.0
+    assert rows_on[0]["Status"] == "Submitted"
+
+
 # --- Term-year coercion for syllabus/Gemini dates (2020 Lab Quiz bug) ---
 from syllasync.date_utils import coerce_to_term_year
 from syllasync.syllabus_module import _parse_gemini_response, SYLLABUS_PROMPT

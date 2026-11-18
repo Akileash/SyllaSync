@@ -12,7 +12,7 @@ from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.datavalidation import DataValidation
 
-from .config import BASE_DIR, EXCEL_FILE_PATH
+from .config import BASE_DIR, EXCEL_FILE_PATH, SYNC_GRADES
 from .course_utils import prefer_course_label
 from .vocab import prefer_status
 from .date_utils import (
@@ -569,7 +569,12 @@ def _merge_tracker(
         if source:
             merged["Source"] = source
         prior_grades = grades_by_task_id.get(task_id) or grades_by_key.get(key) or {}
-        if source.lower() == "canvas":
+        if not SYNC_GRADES:
+            # Leave K-M as they are; the write path still reattaches these
+            # values to the matching row after any sort/rewrite.
+            for col in GRADE_COLUMNS:
+                merged[col] = prior_grades.get(col, "")
+        elif source.lower() == "canvas":
             # Fresh Canvas fetch wins, including blanks (not yet graded).
             for col in GRADE_COLUMNS:
                 merged[col] = row.get(col, "") if col in row.index else prior_grades.get(col, "")
