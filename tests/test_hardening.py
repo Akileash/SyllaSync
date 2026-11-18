@@ -991,8 +991,9 @@ def test_stale_year_canvas_due_is_warned_not_converted(monkeypatch, caplog):
     monkeypatch.setattr(canvas_module, "CANVAS_TOKEN", "fake")
     monkeypatch.setattr(canvas_module, "ALLOWED_COURSES", "COURSE 302")
     monkeypatch.setattr(canvas_module, "TERM_YEAR", 2026)
+    monkeypatch.setattr(canvas_module, "STALE_YEAR_POLICY", "warn")
 
-    with caplog.at_level(logging.WARNING, logger="canvas_module"):
+    with caplog.at_level(logging.WARNING, logger="syllasync.canvas_module"):
         rows = canvas_module.fetch_canvas_assignments(lookback_days=100000, enforce_schedule=False)
 
     assert "stale-year due date" in caplog.text
@@ -1023,6 +1024,7 @@ def test_stale_year_canvas_due_with_override_is_not_warned(monkeypatch, caplog):
     monkeypatch.setattr(canvas_module, "CANVAS_TOKEN", "fake")
     monkeypatch.setattr(canvas_module, "ALLOWED_COURSES", "COURSE 302")
     monkeypatch.setattr(canvas_module, "TERM_YEAR", 2026)
+    monkeypatch.setattr(canvas_module, "STALE_YEAR_POLICY", "warn")
     monkeypatch.setattr(
         "syllasync.sheets_module.load_due_overrides",
         lambda path=None: {
@@ -1042,6 +1044,128 @@ def test_stale_year_canvas_due_with_override_is_not_warned(monkeypatch, caplog):
     midterm = [r for r in rows if r["Task"] == "Midterm"]
     # Fetch still leaves the Canvas date as-is; the override is applied later.
     assert midterm and str(midterm[0]["Due Date"]).startswith("2025-10-30")
+
+
+def _stale_year_course(assignments):
+    return _FakeCourse(
+        36126,
+        "COURSE 302 LEC A2 - Fall 2026 - INTRO DIGITAL LOGIC DESIGN",
+        assignments=assignments,
+    )
+
+
+def test_stale_year_policy_override_prints_pin_hint_and_keeps_date(monkeypatch, caplog):
+    import logging
+
+    import syllasync.canvas_module as canvas_module
+
+    course = _stale_year_course([_FakeAssignment(794672, "Midterm", "2025-10-30T18:30:00Z")])
+    monkeypatch.setattr(canvas_module, "Canvas", lambda url, token: _FakeCanvas([course]))
+    monkeypatch.setattr(canvas_module, "CANVAS_URL", "https://canvas.example")
+    monkeypatch.setattr(canvas_module, "CANVAS_TOKEN", "fake")
+    monkeypatch.setattr(canvas_module, "ALLOWED_COURSES", "COURSE 302")
+    monkeypatch.setattr(canvas_module, "TERM_YEAR", 2026)
+    monkeypatch.setattr(canvas_module, "STALE_YEAR_POLICY", "override")
+
+    with caplog.at_level(logging.WARNING, logger="syllasync.canvas_module"):
+        rows = canvas_module.fetch_canvas_assignments(lookback_days=100000, enforce_schedule=False)
+
+    midterm = [r for r in rows if r["Task"] == "Midterm"]
+    assert midterm and str(midterm[0]["Due Date"]).startswith("2025-10-30")
+    assert "stale-year due date" in caplog.text
+    assert "due_overrides.json" in caplog.text
+    assert '"course": "COURSE 302"' in caplog.text
+    assert '"title": "Midterm"' in caplog.text
+    assert "YYYY-MM-DD HH:MM" in caplog.text
+    assert canvas_module.STALE_YEAR_WARNINGS[0]["hint"]
+    assert "YYYY-MM-DD HH:MM" in canvas_module.STALE_YEAR_WARNINGS[0]["hint"]
+
+
+def test_stale_year_policy_shift_coerces_without_override(monkeypatch, caplog):
+    import logging
+
+    import syllasync.canvas_module as canvas_module
+
+    course = _stale_year_course(
+        [
+            _FakeAssignment(794672, "Midterm", "2025-10-30T18:30:00Z"),
+            _FakeAssignment(794653, "Assignment 1", "2026-09-18T05:59:59Z"),
+            _FakeAssignment(794680, "Winter Quiz", "2025-01-15T17:00:00Z"),
+        ]
+    )
+    monkeypatch.setattr(canvas_module, "Canvas", lambda url, token: _FakeCanvas([course]))
+    monkeypatch.setattr(canvas_module, "CANVAS_URL", "https://canvas.example")
+    monkeypatch.setattr(canvas_module, "CANVAS_TOKEN", "fake")
+    monkeypatch.setattr(canvas_module, "ALLOWED_COURSES", "COURSE 302")
+    monkeypatch.setattr(canvas_module, "TERM_YEAR", 2026)
+    monkeypatch.setattr(canvas_module, "STALE_YEAR_POLICY", "shift")
+
+    with caplog.at_level(logging.INFO, logger="syllasync.canvas_module"):
+        rows = canvas_module.fetch_canvas_assignments(lookback_days=100000, enforce_schedule=False)
+
+    by_task = {r["Task"]: r for r in rows}
+    assert str(by_task["Midterm"]["Due Date"]).startswith("2026-10-30")
+    assert str(by_task["Assignment 1"]["Due Date"]).startswith("2026-09-")
+    assert str(by_task["Winter Quiz"]["Due Date"]).startswith("2027-01-15")
+    assert canvas_module.STALE_YEAR_WARNINGS == []
+    assert "stale-year due date shifted" in caplog.text
+    assert "2025-10-30" in caplog.text
+    assert "STALE_YEAR_POLICY=shift" in caplog.text
+    assert "stale-year due date:" not in caplog.text or "not converted" not in caplog.text
+
+
+def test_stale_year_policy_shift_leaves_override_and_suppresses_warning(monkeypatch, caplog):
+    import logging
+
+    import syllasync.canvas_module as canvas_module
+    from syllasync.dedupe_module import fuzzy_match_key
+
+    course = _stale_year_course([_FakeAssignment(794672, "Midterm", "2025-10-30T18:30:00Z")])
+    monkeypatch.setattr(canvas_module, "Canvas", lambda url, token: _FakeCanvas([course]))
+    monkeypatch.setattr(canvas_module, "CANVAS_URL", "https://canvas.example")
+    monkeypatch.setattr(canvas_module, "CANVAS_TOKEN", "fake")
+    monkeypatch.setattr(canvas_module, "ALLOWED_COURSES", "COURSE 302")
+    monkeypatch.setattr(canvas_module, "TERM_YEAR", 2026)
+    monkeypatch.setattr(canvas_module, "STALE_YEAR_POLICY", "shift")
+    monkeypatch.setattr(
+        "syllasync.sheets_module.load_due_overrides",
+        lambda path=None: {
+            fuzzy_match_key("COURSE 302", "Midterm"): {
+                "course": "COURSE 302",
+                "title": "Midterm",
+                "due": "2026-10-27 12:30",
+            }
+        },
+    )
+
+    with caplog.at_level(logging.INFO, logger="syllasync.canvas_module"):
+        rows = canvas_module.fetch_canvas_assignments(lookback_days=100000, enforce_schedule=False)
+
+    midterm = [r for r in rows if r["Task"] == "Midterm"]
+    assert midterm and str(midterm[0]["Due Date"]).startswith("2025-10-30")
+    assert "stale-year due date" not in caplog.text
+    assert "shifted" not in caplog.text
+    assert canvas_module.STALE_YEAR_WARNINGS == []
+
+
+def test_stale_year_policy_shift_lookback_uses_coerced_year(monkeypatch):
+    import syllasync.canvas_module as canvas_module
+
+    course = _stale_year_course([_FakeAssignment(794672, "Midterm", "2025-11-10T18:30:00Z")])
+    monkeypatch.setattr(canvas_module, "Canvas", lambda url, token: _FakeCanvas([course]))
+    monkeypatch.setattr(canvas_module, "CANVAS_URL", "https://canvas.example")
+    monkeypatch.setattr(canvas_module, "CANVAS_TOKEN", "fake")
+    monkeypatch.setattr(canvas_module, "ALLOWED_COURSES", "COURSE 302")
+    monkeypatch.setattr(canvas_module, "TERM_YEAR", 2026)
+    monkeypatch.setattr(canvas_module, "STALE_YEAR_POLICY", "warn")
+
+    dropped = canvas_module.fetch_canvas_assignments(lookback_days=21, enforce_schedule=False)
+    assert not [r for r in dropped if r["Task"] == "Midterm"]
+
+    monkeypatch.setattr(canvas_module, "STALE_YEAR_POLICY", "shift")
+    kept = canvas_module.fetch_canvas_assignments(lookback_days=21, enforce_schedule=False)
+    midterm = [r for r in kept if r["Task"] == "Midterm"]
+    assert midterm and str(midterm[0]["Due Date"]).startswith("2026-11-10")
 
 
 def test_sync_grades_off_skips_submission_include_and_grade_fields(monkeypatch):

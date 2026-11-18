@@ -79,6 +79,30 @@ def _env_flag(name: str, default: bool = True) -> bool:
 # leave those columns as they are.
 SYNC_GRADES = _env_flag("SYNC_GRADES", True)
 
+STALE_YEAR_POLICIES = frozenset({"warn", "override", "shift"})
+
+
+def parse_stale_year_policy(value: object, *, warn: bool = False) -> str:
+    """Return warn, override, or shift. Unknown or empty values become warn."""
+    raw = str(value or "").strip().lower()
+    if not raw:
+        return "warn"
+    if raw in STALE_YEAR_POLICIES:
+        return raw
+    if warn:
+        print(
+            "Warning: STALE_YEAR_POLICY must be warn, override, or shift; using warn. "
+            "The value was not logged.",
+            file=sys.stderr,
+        )
+    return "warn"
+
+
+# Canvas dues in a year before TERM_YEAR. Default warn leaves the raw date
+# as-is (current behaviour). override adds a due_overrides.json pin hint.
+# shift coerces the year the same way syllabus dates are, unless a pin exists.
+STALE_YEAR_POLICY = parse_stale_year_policy(os.getenv("STALE_YEAR_POLICY"), warn=True)
+
 # Local timezone for Calendar timed events / Discord windows
 LOCAL_TIMEZONE = (os.getenv("LOCAL_TIMEZONE") or "America/Edmonton").strip()
 

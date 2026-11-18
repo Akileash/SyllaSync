@@ -46,7 +46,7 @@ Or copy `examples/.env.example` to `.env` and edit it (UTF-8). Never commit real
 
 Required for `--all`: `CANVAS_URL`, `CANVAS_TOKEN`, `GOOGLE_SHEET_ID`, `GOOGLE_CALENDAR_ID`, `DISCORD_WEBHOOK_URL`
 
-Optional: `GEMINI_API_KEY`, `GEMINI_MODEL`, `ALLOWED_COURSES`, `LOCAL_TIMEZONE`, `TERM_YEAR`, `CANVAS_PAST_DUE_DAYS`, `EXCEL_FILE_PATH`, `SYNC_GRADES`
+Optional: `GEMINI_API_KEY`, `GEMINI_MODEL`, `ALLOWED_COURSES`, `LOCAL_TIMEZONE`, `TERM_YEAR`, `CANVAS_PAST_DUE_DAYS`, `EXCEL_FILE_PATH`, `SYNC_GRADES`, `STALE_YEAR_POLICY`
 
 `local.env` overrides `.env`. Fill sections in `schedule.json`.
 
@@ -77,7 +77,7 @@ Gitignored. Copy from `examples\` and edit.
 
 ### `due_overrides.json`
 
-Pin a due time when Canvas or a syllabus is wrong. Match by course and title. `end` is optional:
+Pin a due time when Canvas or a syllabus is wrong. Match by course and title. `end` is optional. Canvas dues in a year before `TERM_YEAR` stay as-is and are warned (`STALE_YEAR_POLICY=warn`, the default). `override` still leaves them as-is and prints a one-line pin hint. `shift` coerces those dates onto the term year the same way syllabus dates are, unless a pin already exists.
 
 ```json
 {

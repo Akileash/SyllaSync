@@ -16,12 +16,14 @@ from .config import (
     CANVAS_READ_ANNOUNCEMENTS,
     CANVAS_TOKEN,
     CANVAS_URL,
+    STALE_YEAR_POLICY,
     SYNC_GRADES,
     TERM_YEAR,
 )
 from .course_utils import course_matches_allowed, normalize_course_code, parse_allowed_courses
 from .date_utils import (
     apply_lab_monday_due,
+    coerce_to_term_year,
     format_internal_datetime,
     normalize_calendar_date,
     split_title_and_due,
@@ -35,7 +37,7 @@ OUTPUT_COLUMNS = ("Source", "Course", "Task", "Due Date")
 
 # Canvas assignments whose due_at falls in a year before the term year (course
 # shells copied from last year). Filled by fetch_canvas_assignments so callers
-# can surface them; the dates are never rewritten to the current year.
+# can surface them. Default policy is warn (leave the raw date as-is).
 STALE_YEAR_WARNINGS: list[dict[str, Any]] = []
 
 
@@ -287,6 +289,82 @@ def is_stale_year_due(due_formatted: Any, term_year: int | None = None) -> bool:
     return int(iso[:4]) < int(term_year if term_year is not None else TERM_YEAR)
 
 
+def override_pin_hint(course_name: str, title: str) -> str:
+    """One-line due_overrides.json pin hint. The due value is a placeholder."""
+    import json
+
+    payload = {"course": course_name, "title": title, "due": "YYYY-MM-DD HH:MM"}
+    return "Pin it in due_overrides.json: " + json.dumps(payload, ensure_ascii=True)
+
+
+def _shifted_due_at(due_at: str, shifted_formatted: str) -> str:
+    """Copy the coerced year onto the original Canvas due_at timestamp."""
+    iso = normalize_calendar_date(shifted_formatted)
+    if not iso or not due_at or not str(due_at)[:4].isdigit():
+        return due_at
+    return f"{iso[:4]}{due_at[4:]}"
+
+
+def apply_stale_year_policy(
+    *,
+    course_name: str,
+    title: str,
+    canvas_id: Any,
+    due_at: Any,
+    due_formatted: str,
+    has_override: bool,
+    term_year: int | None = None,
+    policy: str | None = None,
+) -> tuple[str, bool]:
+    """Return (due date, whether the year was shifted). Override pins win."""
+    chosen = (policy if policy is not None else STALE_YEAR_POLICY) or "warn"
+    chosen = str(chosen).strip().lower()
+    year = int(term_year if term_year is not None else TERM_YEAR)
+    if not is_stale_year_due(due_formatted, year) or has_override:
+        return due_formatted, False
+    if chosen == "shift":
+        shifted = coerce_to_term_year(due_formatted, year)
+        if shifted != due_formatted:
+            logger.info(
+                "stale-year due date shifted: %s '%s' (Canvas id %s) %s -> %s "
+                "(STALE_YEAR_POLICY=shift).",
+                course_name,
+                title or "?",
+                canvas_id if canvas_id is not None else "?",
+                due_formatted,
+                shifted,
+            )
+            return shifted, True
+        return due_formatted, False
+    message = (
+        "stale-year due date: %s '%s' (Canvas id %s) due_at=%s is before "
+        "term year %d - not converted; check Canvas/announcements for the "
+        "current date."
+    )
+    args = (
+        course_name,
+        title or "?",
+        canvas_id if canvas_id is not None else "?",
+        due_at,
+        year,
+    )
+    item: dict[str, Any] = {
+        "Course": course_name,
+        "Task": title,
+        "Canvas ID": canvas_id,
+        "due_at": due_at,
+        "term_year": year,
+    }
+    if chosen == "override":
+        hint = override_pin_hint(course_name, title or "?")
+        logger.warning(message + " %s", *args, hint)
+        item["hint"] = hint
+    else:
+        logger.warning(message, *args)
+    STALE_YEAR_WARNINGS.append(item)
+    return due_formatted, False
+
+
 def _course_label(course) -> str:
     return (
         getattr(course, "course_code", None)
@@ -351,35 +429,22 @@ def fetch_canvas_assignments(
                 continue
             due_at = getattr(assignment, "due_at", None)
             assignment_name = getattr(assignment, "name", "Untitled Assignment")
-            if due_at and is_stale_year_due(_format_due_date(due_at)):
-                # Surface, do not silently drop or auto-convert to this year.
-                # A due_overrides.json pin is the conversion; skip the warning then.
-                if not _has_due_override(course_name, assignment_name):
-                    logger.warning(
-                        "stale-year due date: %s '%s' (Canvas id %s) due_at=%s is before "
-                        "term year %d - not converted; check Canvas/announcements for the "
-                        "current date.",
-                        course_name,
-                        assignment_name or "?",
-                        getattr(assignment, "id", "?"),
-                        due_at,
-                        TERM_YEAR,
-                    )
-                    STALE_YEAR_WARNINGS.append(
-                        {
-                            "Course": course_name,
-                            "Task": assignment_name,
-                            "Canvas ID": getattr(assignment, "id", None),
-                            "due_at": due_at,
-                            "term_year": TERM_YEAR,
-                        }
-                    )
-            if not _within_window(due_at, lookback) and not _has_due_override(
-                course_name, assignment_name
-            ):
+            has_override = _has_due_override(course_name, assignment_name)
+            due_formatted = _format_due_date(due_at) or "No due date"
+            due_formatted, shifted = apply_stale_year_policy(
+                course_name=course_name,
+                title=assignment_name,
+                canvas_id=getattr(assignment, "id", None),
+                due_at=due_at,
+                due_formatted=due_formatted,
+                has_override=has_override,
+            )
+            window_due = due_at
+            if shifted and due_at:
+                window_due = _shifted_due_at(str(due_at), due_formatted)
+            if not _within_window(window_due, lookback) and not has_override:
                 continue
             raw_title = getattr(assignment, "name", "Untitled Assignment")
-            due_formatted = _format_due_date(due_at) or "No due date"
             # Strip "Due date …" out of Canvas names so Sheets titles stay clean
             clean_title, due_formatted = split_title_and_due(raw_title, due_formatted)
             due_formatted = apply_lab_monday_due(

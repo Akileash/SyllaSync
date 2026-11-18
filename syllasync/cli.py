@@ -299,6 +299,9 @@ def fetch_all_data(
         )
         for item in STALE_YEAR_WARNINGS:
             print(f"        - {item['Course']} '{item['Task']}' due_at={item['due_at']}")
+            hint = item.get("hint")
+            if hint:
+                print(f"          {hint}")
 
     try:
         syllabus_data = fetch_syllabus_assignments()
