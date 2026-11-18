@@ -5,18 +5,39 @@ I got tired of tracking deadlines across Canvas and a pile of syllabi, so I wrot
 ![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
-## Windows setup
+## Setup
+
+Python 3.10+.
+
+**Windows**
 
 ```powershell
 py -3 -m venv venv
 .\venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
 pip install -r requirements.txt
-Copy-Item examples\.env.example .env
 Copy-Item examples\schedule.example.json schedule.json
 ```
 
-Edit `.env` (UTF-8). Never commit real values.
+**macOS / Linux**
+
+```bash
+python3 -m venv venv
+source venv/bin/activate
+python -m pip install --upgrade pip
+pip install -r requirements.txt
+cp examples/schedule.example.json schedule.json
+```
+
+Put a Google service-account key in `credentials.json` (shape: `examples/credentials.json.example`). Share the Sheet (Editor) and Calendar (Make changes to events) with `client_email`. Tab name: `Masterlist`. Notes: `docs/google-sheet-instructions/`.
+
+Then run the setup wizard (writes `.env`, does not print secrets, does not change `credentials.json`):
+
+```
+python main.py --setup
+```
+
+Or copy `examples/.env.example` to `.env` and edit it (UTF-8). Never commit real values.
 
 Required for `--all`: `CANVAS_URL`, `CANVAS_TOKEN`, `GOOGLE_SHEET_ID`, `GOOGLE_CALENDAR_ID`, `DISCORD_WEBHOOK_URL`
 
@@ -24,9 +45,7 @@ Optional: `GEMINI_API_KEY`, `GEMINI_MODEL`, `ALLOWED_COURSES`, `LOCAL_TIMEZONE`,
 
 `local.env` overrides `.env`. Fill sections in `schedule.json`.
 
-Put a Google service-account key in `credentials.json` (shape: `examples\credentials.json.example`). Share the Sheet (Editor) and Calendar (Make changes to events) with `client_email`. Tab name: `Masterlist`. Notes: `docs\google-sheet-instructions\`.
-
-```powershell
+```
 python main.py --check --all
 ```
 
