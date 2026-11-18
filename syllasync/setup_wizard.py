@@ -43,6 +43,8 @@ FIELD_NAMES = (
     "LOCAL_TIMEZONE",
     "TERM_YEAR",
     "SYNC_GRADES",
+    "SHEET_TAB_NAME",
+    "SHEET_DATA_START_ROW",
 )
 _ASSIGN_RE = re.compile(r"^(\s*#\s*)?([A-Za-z_][A-Za-z0-9_]*)=(.*)$")
 
@@ -175,6 +177,8 @@ def _field_prompt(name: str, *, optional: bool) -> str:
         "LOCAL_TIMEZONE": "Local timezone (IANA, e.g. America/Edmonton)",
         "TERM_YEAR": "Term year (Fall start year)",
         "SYNC_GRADES": "Pull Canvas grades into the sheet?",
+        "SHEET_TAB_NAME": "Sheet tab name",
+        "SHEET_DATA_START_ROW": "Sheet data start row (1-based)",
     }
     label = labels.get(name, name)
     if name == "SYNC_GRADES":
@@ -183,6 +187,10 @@ def _field_prompt(name: str, *, optional: bool) -> str:
         return f"{label}, blank to infer: "
     if name == "LOCAL_TIMEZONE":
         return f"{label} [America/Edmonton]: "
+    if name == "SHEET_TAB_NAME":
+        return f"{label} [Masterlist]: "
+    if name == "SHEET_DATA_START_ROW":
+        return f"{label} [11]: "
     if optional:
         return f"{label} (optional, blank to skip): "
     return f"{label}: "
@@ -220,6 +228,10 @@ def collect_values(
         if not raw:
             if name == "LOCAL_TIMEZONE" and not current:
                 result[name] = "America/Edmonton"
+            elif name == "SHEET_TAB_NAME" and not current:
+                result[name] = "Masterlist"
+            elif name == "SHEET_DATA_START_ROW" and not current:
+                result[name] = "11"
             elif optional:
                 result[name] = ""
             elif current:
@@ -233,7 +245,18 @@ def collect_values(
                         raw = _ask(prompt, input_fn)
                 result[name] = raw
         else:
-            result[name] = raw
+            if name == "SHEET_DATA_START_ROW":
+                try:
+                    number = int(raw)
+                except ValueError:
+                    number = 0
+                if number < 1:
+                    print_fn("SHEET_DATA_START_ROW must be a positive integer; using 11.")
+                    result[name] = "11"
+                else:
+                    result[name] = str(number)
+            else:
+                result[name] = raw
     return result
 
 
@@ -291,6 +314,13 @@ def run_setup(
     _copy_schedule_if_missing(repo, out)
 
     out(_credentials_hint(creds_path))
+    out(
+        "Sheet layout defaults to tab Masterlist, data from row 11, columns "
+        "A-H and K-M (I-J are left alone). Set SHEET_TAB_NAME and "
+        "SHEET_DATA_START_ROW for a different tab or a simple header-plus-rows "
+        "sheet (SHEET_DATA_START_ROW=2, headers in row 1). Missing tabs are "
+        "not created automatically."
+    )
 
     out("Next: python main.py --check --all")
     out("Then preview with: python main.py --all --dry-run")
