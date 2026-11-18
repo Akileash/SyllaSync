@@ -236,6 +236,82 @@ def test_merge_canvas_grades_and_submitted_status(tmp_path, monkeypatch):
     assert merged.iloc[0]["Grade"] == "90%"
 
 
+def test_env_flag_sync_grades_default_on_and_opt_out(monkeypatch):
+    from syllasync.config import _env_flag
+
+    monkeypatch.delenv("SYNC_GRADES", raising=False)
+    assert _env_flag("SYNC_GRADES", True) is True
+    monkeypatch.setenv("SYNC_GRADES", "")
+    assert _env_flag("SYNC_GRADES", True) is True
+    monkeypatch.setenv("SYNC_GRADES", "1")
+    assert _env_flag("SYNC_GRADES", True) is True
+    monkeypatch.setenv("SYNC_GRADES", "true")
+    assert _env_flag("SYNC_GRADES", True) is True
+    for raw in ("0", "false", "no", "off", "FALSE", "Off"):
+        monkeypatch.setenv("SYNC_GRADES", raw)
+        assert _env_flag("SYNC_GRADES", True) is False, raw
+
+
+def test_merge_keeps_existing_grades_when_sync_grades_off(tmp_path, monkeypatch):
+    import pandas as pd
+
+    from syllasync.dedupe_module import TASK_ID_COL
+    from syllasync import sheets_module
+
+    monkeypatch.setattr("syllasync.dedupe_module.STATE_PATH", tmp_path / "state.json")
+    monkeypatch.setattr(sheets_module, "SYNC_GRADES", False)
+    existing = pd.DataFrame(
+        [
+            {
+                "Course": "COURSE 101",
+                "Assessment title": "HW1",
+                "Due Date": "2026-10-01",
+                "Estimated time dedicated to task": "",
+                "Status": "Submitted",
+                "Priority": "",
+                TASK_ID_COL: "canvas_1",
+                "Is Draft": False,
+                "Points Earned": 18,
+                "Points Possible": 20,
+                "Grade": "90%",
+            }
+        ]
+    )
+    incoming_blank = pd.DataFrame(
+        [
+            {
+                "Course": "COURSE 101",
+                "Assessment title": "HW1",
+                "Due Date": "2026-10-01",
+                TASK_ID_COL: "canvas_1",
+                "Is Draft": False,
+                "Source": "Canvas",
+            }
+        ]
+    )
+    incoming_new = pd.DataFrame(
+        [
+            {
+                "Course": "COURSE 101",
+                "Assessment title": "HW1",
+                "Due Date": "2026-10-01",
+                TASK_ID_COL: "canvas_1",
+                "Is Draft": False,
+                "Source": "Canvas",
+                "Points Earned": 5,
+                "Points Possible": 20,
+                "Grade": "25%",
+            }
+        ]
+    )
+    for incoming in (incoming_blank, incoming_new):
+        merged = sheets_module.merge_tracker(existing, incoming)
+        assert merged.iloc[0]["Points Earned"] == 18
+        assert merged.iloc[0]["Points Possible"] == 20
+        assert merged.iloc[0]["Grade"] == "90%"
+        assert merged.iloc[0]["Status"] == "Submitted"
+
+
 def test_masterlist_grade_cells_km():
     from syllasync.google_sheets_module import _grade_values, _internal_to_masterlist_row
 

@@ -65,6 +65,19 @@ CANVAS_READ_ANNOUNCEMENTS = os.getenv("CANVAS_READ_ANNOUNCEMENTS", "1").strip().
     "off",
 }
 
+
+def _env_flag(name: str, default: bool = True) -> bool:
+    raw = os.getenv(name)
+    if raw is None or not str(raw).strip():
+        return default
+    return str(raw).strip().lower() not in {"0", "false", "no", "off"}
+
+
+# Pull Canvas grades into Masterlist columns K-M. Default on so current
+# behaviour is unchanged. Set SYNC_GRADES=0 to skip the grade fetch and
+# leave those columns as they are.
+SYNC_GRADES = _env_flag("SYNC_GRADES", True)
+
 # Local timezone for Calendar timed events / Discord windows
 LOCAL_TIMEZONE = (os.getenv("LOCAL_TIMEZONE") or "America/Edmonton").strip()
 
