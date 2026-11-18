@@ -1,17 +1,21 @@
 """Windows Task Scheduler helpers and a simple cross-platform daily daemon.
 
-Uses only the Python standard library. The install/uninstall path shells out to
-``schtasks`` (Windows). On other platforms those entry points refuse to run and
-point the user at ``--daemon`` instead.
+Uses only the Python standard library. ``--install-schedule`` shells out to
+``schtasks`` on Windows. On macOS and Linux it prints a cron line plus a
+launchd plist or systemd user timer; it does not change the crontab or
+install a service. ``--daemon`` is a long-running alternative that runs
+``main.py --all`` once a day and appends to ``logs/daily_sync.log``.
 """
 
 from __future__ import annotations
 
 import logging
 import re
+import shlex
 import subprocess
 import sys
 import time as time_module
+import xml.sax.saxutils
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Callable
@@ -148,6 +152,179 @@ def build_query_command(task_name: str = DEFAULT_TASK_NAME) -> list[str]:
     return ["schtasks", "/Query", "/TN", task_name, "/V", "/FO", "LIST"]
 
 
+LAUNCHD_LABEL = "com.syllasync.daily"
+SYSTEMD_UNIT_NAME = "syllasync"
+
+
+def _as_posix(path: str | Path) -> str:
+    return str(path).replace("\\", "/").rstrip("/")
+
+
+def _posix_paths(
+    python_exe: str | Path | None,
+    repo_dir: str | Path | None,
+) -> tuple[str, str, str]:
+    # Forward slashes so cron/launchd/systemd snippets stay valid even
+    # when these helpers run on Windows.
+    python = _as_posix(python_exe if python_exe is not None else sys.executable)
+    repo = _as_posix(repo_dir if repo_dir is not None else _default_repo_dir())
+    log_file = f"{repo}/logs/daily_sync.log"
+    return python, repo, log_file
+
+
+def build_cron_line(
+    time: str = DEFAULT_TIME,
+    python_exe: str | Path | None = None,
+    repo_dir: str | Path | None = None,
+) -> str:
+    """Build a daily crontab line that runs ``main.py --all`` and appends a log."""
+    validate_time(time)
+    hour, minute = (int(part) for part in time.split(":"))
+    python, repo, log_file = _posix_paths(python_exe, repo_dir)
+    return (
+        f"{minute} {hour} * * * "
+        f"cd {shlex.quote(repo)} && mkdir -p logs && "
+        f"{shlex.quote(python)} main.py --all >> {shlex.quote(log_file)} 2>&1"
+    )
+
+
+def build_launchd_plist(
+    time: str = DEFAULT_TIME,
+    python_exe: str | Path | None = None,
+    repo_dir: str | Path | None = None,
+    label: str = LAUNCHD_LABEL,
+) -> str:
+    """Build a launchd plist that runs ``main.py --all`` daily and appends a log."""
+    validate_time(time)
+    hour, minute = (int(part) for part in time.split(":"))
+    python, repo, log_file = _posix_paths(python_exe, repo_dir)
+    main_py = f"{repo}/main.py"
+    esc = xml.sax.saxutils.escape
+    return (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" '
+        '"http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n'
+        '<plist version="1.0">\n'
+        "<dict>\n"
+        "  <key>Label</key>\n"
+        f"  <string>{esc(label)}</string>\n"
+        "  <key>WorkingDirectory</key>\n"
+        f"  <string>{esc(repo)}</string>\n"
+        "  <key>ProgramArguments</key>\n"
+        "  <array>\n"
+        f"    <string>{esc(python)}</string>\n"
+        f"    <string>{esc(main_py)}</string>\n"
+        "    <string>--all</string>\n"
+        "  </array>\n"
+        "  <key>StartCalendarInterval</key>\n"
+        "  <dict>\n"
+        "    <key>Hour</key>\n"
+        f"    <integer>{hour}</integer>\n"
+        "    <key>Minute</key>\n"
+        f"    <integer>{minute}</integer>\n"
+        "  </dict>\n"
+        "  <key>StandardOutPath</key>\n"
+        f"  <string>{esc(log_file)}</string>\n"
+        "  <key>StandardErrorPath</key>\n"
+        f"  <string>{esc(log_file)}</string>\n"
+        "</dict>\n"
+        "</plist>\n"
+    )
+
+
+def build_systemd_service(
+    python_exe: str | Path | None = None,
+    repo_dir: str | Path | None = None,
+) -> str:
+    """Build a systemd user service (oneshot) that runs ``main.py --all``."""
+    python, repo, log_file = _posix_paths(python_exe, repo_dir)
+    main_py = f"{repo}/main.py"
+    exec_start = f"{shlex.quote(python)} {shlex.quote(main_py)} --all"
+    return (
+        "[Unit]\n"
+        "Description=SyllaSync daily --all\n"
+        "\n"
+        "[Service]\n"
+        "Type=oneshot\n"
+        f"WorkingDirectory={repo}\n"
+        f"ExecStart={exec_start}\n"
+        f"StandardOutput=append:{log_file}\n"
+        f"StandardError=append:{log_file}\n"
+    )
+
+
+def build_systemd_timer(time: str = DEFAULT_TIME) -> str:
+    """Build a systemd user timer that fires daily at ``HH:MM``."""
+    validate_time(time)
+    hour, minute = (int(part) for part in time.split(":"))
+    return (
+        "[Unit]\n"
+        "Description=SyllaSync daily timer\n"
+        "\n"
+        "[Timer]\n"
+        f"OnCalendar=*-*-* {hour:02d}:{minute:02d}:00\n"
+        "Persistent=true\n"
+        "\n"
+        "[Install]\n"
+        "WantedBy=timers.target\n"
+    )
+
+
+def format_unix_schedule(
+    time: str = DEFAULT_TIME,
+    python_exe: str | Path | None = None,
+    repo_dir: str | Path | None = None,
+    *,
+    platform: str | None = None,
+) -> str:
+    """Human-readable cron plus launchd or systemd snippets. Does not install."""
+    validate_time(time)
+    host = platform if platform is not None else sys.platform
+    lines = [
+        "Task Scheduler is Windows-only. Nothing was installed.",
+        "Use cron (or the unit below) to run main.py --all daily,",
+        "appending to logs/daily_sync.log.",
+        "",
+        "Cron (add with crontab -e):",
+        build_cron_line(time=time, python_exe=python_exe, repo_dir=repo_dir),
+        "",
+    ]
+    if host == "darwin":
+        lines.extend(
+            [
+                f"macOS launchd plist (save as ~/Library/LaunchAgents/{LAUNCHD_LABEL}.plist,",
+                "then: launchctl load ~/Library/LaunchAgents/" + f"{LAUNCHD_LABEL}.plist):",
+                "",
+                build_launchd_plist(
+                    time=time, python_exe=python_exe, repo_dir=repo_dir
+                ).rstrip(),
+                "",
+            ]
+        )
+    else:
+        lines.extend(
+            [
+                f"systemd user unit (save as ~/.config/systemd/user/{SYSTEMD_UNIT_NAME}.service",
+                f"and {SYSTEMD_UNIT_NAME}.timer, then:",
+                f"  systemctl --user daemon-reload && systemctl --user enable --now {SYSTEMD_UNIT_NAME}.timer):",
+                "",
+                f"# {SYSTEMD_UNIT_NAME}.service",
+                build_systemd_service(python_exe=python_exe, repo_dir=repo_dir).rstrip(),
+                "",
+                f"# {SYSTEMD_UNIT_NAME}.timer",
+                build_systemd_timer(time=time).rstrip(),
+                "",
+            ]
+        )
+    lines.extend(
+        [
+            "Or keep a process running:",
+            f"  python main.py --daemon --time {time}",
+        ]
+    )
+    return "\n".join(lines) + "\n"
+
+
 def _run_schtasks(argv: list[str]) -> int:
     """Run a schtasks argv list; print a short result; return the exit code."""
     logger.info("Running: %s", " ".join(argv))
@@ -176,12 +353,17 @@ def install_schedule(
 ) -> int:
     """Register a daily Task Scheduler job. Windows only; returns the exit code."""
     if sys.platform != "win32":
-        print(
-            "Task Scheduler install is only available on Windows.\n"
-            "On this system, keep the process alive instead with:\n"
-            f"  python main.py --daemon --time {time}"
-        )
-        return 1
+        try:
+            print(
+                format_unix_schedule(
+                    time=time, python_exe=python_exe, repo_dir=repo_dir
+                ),
+                end="",
+            )
+        except ValueError as exc:
+            print(f"Cannot install schedule: {exc}", file=sys.stderr)
+            return 2
+        return 0
 
     try:
         argv = build_install_command(
@@ -245,6 +427,33 @@ def seconds_until_next(hhmm: str, now: datetime) -> float:
     if target <= now:
         target = target + timedelta(days=1)
     return max(0.0, (target - now).total_seconds())
+
+
+def default_daemon_run_fn(
+    python_exe: str | Path | None = None,
+    repo_dir: str | Path | None = None,
+) -> Callable[[], None]:
+    """Return a callable that runs ``main.py --all`` and appends to the daily log."""
+    python = str(python_exe if python_exe is not None else sys.executable)
+    repo_path = Path(repo_dir if repo_dir is not None else _default_repo_dir())
+    log_path = repo_path / "logs" / "daily_sync.log"
+    argv = [python, str(repo_path / "main.py"), "--all"]
+
+    def _run() -> None:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now().isoformat(timespec="seconds")
+        with log_path.open("a", encoding="utf-8") as handle:
+            handle.write(f"--- {stamp} ---\n")
+            handle.flush()
+            subprocess.run(
+                argv,
+                cwd=str(repo_path),
+                stdout=handle,
+                stderr=subprocess.STDOUT,
+                check=False,
+            )
+
+    return _run
 
 
 def run_daemon(

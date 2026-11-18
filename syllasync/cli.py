@@ -122,7 +122,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--install-schedule",
         action="store_true",
-        help="Register a daily Windows Task Scheduler job that runs main.py --all.",
+        help=(
+            "On Windows, register a daily Task Scheduler job that runs main.py --all. "
+            "On macOS and Linux, print cron and launchd or systemd snippets (nothing is installed)."
+        ),
     )
     parser.add_argument(
         "--uninstall-schedule",
@@ -144,8 +147,8 @@ def parse_args() -> argparse.Namespace:
         "--daemon",
         action="store_true",
         help=(
-            "Stay running and execute the --all pipeline once a day at --time "
-            "(stdlib loop; no Task Scheduler)."
+            "Stay running and execute the --all pipeline once a day at --time, "
+            "appending to logs/daily_sync.log (stdlib loop; no Task Scheduler)."
         ),
     )
     return parser.parse_args()
@@ -403,7 +406,12 @@ def main() -> None:
 
     # Early schedule dispatch: install/uninstall exit; daemon loops.
     if args.install_schedule or args.uninstall_schedule or args.daemon:
-        from .schedule_installer import install_schedule, run_daemon, uninstall_schedule
+        from .schedule_installer import (
+            default_daemon_run_fn,
+            install_schedule,
+            run_daemon,
+            uninstall_schedule,
+        )
 
         if args.install_schedule:
             raise SystemExit(
@@ -412,15 +420,13 @@ def main() -> None:
         if args.uninstall_schedule:
             raise SystemExit(uninstall_schedule(task_name=args.task_name))
 
-        def _daemon_run() -> None:
-            import subprocess
-
-            subprocess.run(
-                [sys.executable, str(Path(__file__).resolve().parent.parent / "main.py"), "--all"],
-                check=False,
-            )
-
-        run_daemon(time=args.time, run_fn=_daemon_run)
+        run_daemon(
+            time=args.time,
+            run_fn=default_daemon_run_fn(
+                python_exe=sys.executable,
+                repo_dir=Path(__file__).resolve().parent.parent,
+            ),
+        )
         return
 
     if not args.check:
