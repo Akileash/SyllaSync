@@ -40,6 +40,25 @@ MONTH_MAP = {
     "dec": 12,
 }
 
+_MONTH_NAME = (
+    r"Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|June?|July?"
+    r"|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?"
+)
+_GLUED_WORD_PATTERNS = (
+    (re.compile(r"\b(final)(exam(?:ination)?s?)\b", re.IGNORECASE), r"\1 \2"),
+    (re.compile(r"\b(midterm)(exams?)\b", re.IGNORECASE), r"\1 \2"),
+    (re.compile(r"\b(lab)(quizzes|quiz)\b", re.IGNORECASE), r"\1 \2"),
+    (re.compile(r"\b(online)(assignments?)\b", re.IGNORECASE), r"\1 \2"),
+    (re.compile(r"\b(deferred)(final)\b", re.IGNORECASE), r"\1 \2"),
+)
+
+_DATE_RANGE_RE = re.compile(
+    rf"({_MONTH_NAME})\.?\s+(\d{{1,2}})\s*(?:[-–—]|to)\s*"
+    rf"(?:({_MONTH_NAME})\.?\s+)?(\d{{1,2}})",
+    re.IGNORECASE,
+)
+
+
 SYLLABUS_PROMPT = """You are a syllabus parser. Extract all midterms, finals, and major assignments
 from the following syllabus text.
 
@@ -146,8 +165,94 @@ def _extract_pdf_text(pdf_path: Path) -> str:
     return text
 
 
+
 def _normalize_pdf_text(text: str) -> str:
-    return re.sub(r"\s+", " ", text).strip()
+    """Collapse whitespace and repair common PDF typography glitches."""
+    cleaned = text or ""
+    for src, dst in (
+        ("\ufb00", "ff"),
+        ("\ufb01", "fi"),
+        ("\ufb02", "fl"),
+        ("\ufb03", "ffi"),
+        ("\ufb04", "ffl"),
+    ):
+        cleaned = cleaned.replace(src, dst)
+    cleaned = re.sub(r"([a-z])([A-Z])", r"\1 \2", cleaned)
+    cleaned = re.sub(
+        rf"({_MONTH_NAME})\.?(?=\d)",
+        r"\1 ",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    cleaned = re.sub(
+        rf"(\d{{1,2}})({_MONTH_NAME})\b",
+        r"\1 \2",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    cleaned = re.sub(
+        r"(Mon(?:day)?|Tue(?:s(?:day)?)?|Wed(?:nesday)?|Thu(?:rs(?:day)?)?|Fri(?:day)?|Sat(?:urday)?|Sun(?:day)?)(?=\d)",
+        r"\1 ",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    cleaned = re.sub(r"\b(exams)(on)\b", r"\1 \2", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\b(\d{1,2})(\d{2}:\d{2})\b", r"\1 \2", cleaned)
+    cleaned = re.sub(
+        r"(\d)([ap]\.?m\.?)\b", r"\1 \2", cleaned, flags=re.IGNORECASE
+    )
+    for pattern, repl in _GLUED_WORD_PATTERNS:
+        cleaned = pattern.sub(repl, cleaned)
+    return re.sub(r"\s+", " ", cleaned).strip()
+
+
+def _clock_from_suffix(suffix: str) -> str | None:
+    clock = _CLOCK_AFTER_DATE_RE.match(suffix or "")
+    return _hhmm_from_clock_match(clock) if clock else None
+
+
+def _parse_flexible_date(fragment: str) -> tuple[str, str] | None:
+    """Parse a month/day or day/month date plus an optional clock.
+
+    Returns (YYYY-MM-DD, HH:MM or "").
+    """
+    text = (fragment or "").strip()
+    if not text:
+        return None
+    iso = re.match(r"^(\d{4}-\d{2}-\d{2})\b", text)
+    if iso:
+        hhmm = _clock_from_suffix(text[iso.end() :]) or ""
+        return iso.group(1), hhmm
+    day_first = re.match(
+        rf"^(\d{{1,2}})(?:st|nd|rd|th)?\s+({_MONTH_NAME})\.?,?\s*(\d{{4}})?\b",
+        text,
+        re.IGNORECASE,
+    )
+    if day_first:
+        year = int(day_first.group(3)) if day_first.group(3) else None
+        due = _month_day_to_iso(day_first.group(2), day_first.group(1), year)
+        hhmm = _clock_from_suffix(text[day_first.end() :]) or ""
+        return due, hhmm
+    month_first = re.match(
+        rf"^({_MONTH_NAME})\.?\s+(\d{{1,2}})(?:st|nd|rd|th)?,?\s*(\d{{4}})?\b",
+        text,
+        re.IGNORECASE,
+    )
+    if month_first:
+        year = int(month_first.group(3)) if month_first.group(3) else None
+        due = _month_day_to_iso(
+            month_first.group(1), month_first.group(2), year
+        )
+        hhmm = _clock_from_suffix(text[month_first.end() :]) or ""
+        return due, hhmm
+    return None
+
+
+def _due_string(parsed: tuple[str, str]) -> str:
+    due, hhmm = parsed
+    return f"{due} {hhmm}".strip() if hhmm else due
+
+
 
 
 def _course_from_filename(filename: str) -> str:
@@ -448,7 +553,7 @@ def parse_weekly_schedule_text(text: str, course: str) -> list[dict[str, Any]]:
     assignments: list[dict[str, Any]] = []
 
     for match in re.finditer(
-        r"HW(\d+)\s+due\s+5PM\s+Thurs\s+(\w+)\s+(\d+)",
+        r"HW(\d+)\s+due\s+5\s*PM\s+Thurs\s+(\w+)\s+(\d+)",
         normalized,
         re.IGNORECASE,
     ):
@@ -508,6 +613,152 @@ def parse_weekly_schedule_text(text: str, course: str) -> list[dict[str, Any]]:
         seen_hw.add(task)
 
     return assignments
+
+
+
+def parse_due_labeled_items(text: str, course: str) -> list[dict[str, Any]]:
+    """Numbered assignments and quizzes with Due: / closes on / no later than."""
+    normalized = _normalize_pdf_text(text)
+    assignments: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    def add(task: str, due: str) -> None:
+        key = task.strip().lower()
+        if not key or key in seen:
+            return
+        seen.add(key)
+        assignments.append(_record(course, task, due))
+
+    def window_after(start: int) -> str:
+        chunk = normalized[start : start + 500]
+        nxt = re.search(
+            r"\b(?:Assignment\s*#?\s*\d+|Quiz\s*#?\s*\d+)\b",
+            chunk,
+            re.IGNORECASE,
+        )
+        return chunk[: nxt.start()] if nxt else chunk
+
+    def date_from_window(window: str) -> str | None:
+        due_label = re.search(
+            r"Due:\s*(?:no later than\s+)?", window, re.IGNORECASE
+        )
+        if due_label:
+            parsed = _parse_flexible_date(window[due_label.end() :])
+            if parsed:
+                return _due_string(parsed)
+        later = re.search(r"no later than\s+", window, re.IGNORECASE)
+        if later:
+            parsed = _parse_flexible_date(window[later.end() :])
+            if parsed:
+                return _due_string(parsed)
+        closes = re.search(
+            r"(?:closes on|due(?:\s+date)?\s*:?)\s+", window, re.IGNORECASE
+        )
+        if closes:
+            parsed = _parse_flexible_date(window[closes.end() :])
+            if parsed:
+                return _due_string(parsed)
+        return None
+
+    for match in re.finditer(
+        r"\bAssignment\s*#?\s*(\d+)\b", normalized, re.IGNORECASE
+    ):
+        due = date_from_window(window_after(match.end()))
+        if due:
+            add(f"Assignment #{match.group(1)}", due)
+
+    for match in re.finditer(
+        r"\bQuiz\s*#?\s*(\d+)\b", normalized, re.IGNORECASE
+    ):
+        due = date_from_window(window_after(match.end()))
+        if due:
+            add(f"Quiz #{match.group(1)}", due)
+
+    return assignments
+
+
+def parse_lab_quiz_schedule_text(text: str, course: str) -> list[dict[str, Any]]:
+    """Lab Quiz N rows from a week range. Bare 'Lab Quiz 1 Sept 15' is ignored."""
+    normalized = _normalize_pdf_text(text)
+    assignments: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    def add(number: int, due: str) -> None:
+        task = f"Lab Quiz {number}"
+        key = task.lower()
+        if key in seen:
+            return
+        seen.add(key)
+        assignments.append(_record(course, task, due))
+
+    def end_iso(match: re.Match[str]) -> str:
+        month = match.group(3) or match.group(1)
+        return _month_day_to_iso(month, match.group(4))
+
+    for match in re.finditer(
+        r"\bLab\s+Quiz\s+(\d+)\b", normalized, re.IGNORECASE
+    ):
+        number = int(match.group(1))
+        window_start = max(0, match.start() - 220)
+        window = normalized[window_start : match.end() + 80]
+        label_at = match.start() - window_start
+        before = [rm for rm in _DATE_RANGE_RE.finditer(window) if rm.end() <= label_at]
+        after = [rm for rm in _DATE_RANGE_RE.finditer(window) if rm.start() >= label_at]
+        ranged = before[-1] if before else (after[0] if after else None)
+        if ranged:
+            add(number, end_iso(ranged))
+
+    header = re.search(
+        r"\bLab\s+quizzes?\b(?:\s+\d+\s*%)?\s*(?:Tentative\s+Schedule:)?\s*",
+        normalized,
+        re.IGNORECASE,
+    )
+    if header:
+        rest = normalized[header.end() :]
+        stop = re.search(
+            r"\b(?:Online\s+Assignments?|Midterm|Final\s+Exam)\b",
+            rest,
+            re.IGNORECASE,
+        )
+        block = rest[: stop.start()] if stop else rest[:600]
+        if not re.search(r"\bweek\s+\d+\b", block, re.IGNORECASE):
+            next_number = 1
+            while f"lab quiz {next_number}" in seen:
+                next_number += 1
+            for ranged in _DATE_RANGE_RE.finditer(block):
+                add(next_number, end_iso(ranged))
+                next_number += 1
+
+    return assignments
+
+
+def _row_has_concrete_date(row: dict[str, Any]) -> bool:
+    due = str(row.get("Due Date") or "").strip().upper()
+    return bool(due) and due not in {"TBD", "TBA"}
+
+
+def _dedupe_parser_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Keep one row per task title; prefer a concrete date, then a longer due string."""
+    best: dict[str, dict[str, Any]] = {}
+    order: list[str] = []
+    for row in rows:
+        key = str(row.get("Task") or "").strip().lower()
+        if not key:
+            continue
+        current = best.get(key)
+        if current is None:
+            best[key] = row
+            order.append(key)
+            continue
+        new_dated = _row_has_concrete_date(row)
+        old_dated = _row_has_concrete_date(current)
+        if new_dated and not old_dated:
+            best[key] = row
+        elif new_dated and old_dated and len(str(row.get("Due Date") or "")) > len(
+            str(current.get("Due Date") or "")
+        ):
+            best[key] = row
+    return [best[key] for key in order]
 
 
 def parse_syllabus_exam_text(text: str, course: str) -> list[dict[str, Any]]:
@@ -591,6 +842,25 @@ def parse_syllabus_exam_text(text: str, course: str) -> list[dict[str, Any]]:
         _, day, month, year = deferred.groups()
         due = _month_day_to_iso(month, day, int(year))
         add("Deferred Final Exam", due)
+
+
+    deferred_loose = re.finditer(
+        r"\bdeferred\s+(?:final\s+)?exam(?:ination)?s?(?:on)?\b.{0,90}?"
+        r"(?:(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)[a-z]*,?\s+)?"
+        r"(?:"
+        rf"(\d{{1,2}})\s+({_MONTH_NAME})"
+        rf"|({_MONTH_NAME})\.?\s+(\d{{1,2}})"
+        r")"
+        r"(?:,?\s*(\d{4}))?",
+        normalized,
+        re.IGNORECASE,
+    )
+    for match in deferred_loose:
+        day = match.group(1) or match.group(4)
+        month = match.group(2) or match.group(3)
+        year = int(match.group(5)) if match.group(5) else None
+        if day and month:
+            add("Deferred Final Exam", _month_day_to_iso(month, day, year))
 
     return assignments
 
@@ -769,28 +1039,24 @@ def _is_syllabus_pdf(pdf_path: Path) -> bool:
     return "syllabus" in name and "weekly" not in name and "schedule" not in name
 
 
+
 def _parse_with_deterministic_parser(pdf_path: Path, text: str) -> list[dict[str, Any]] | None:
     course = _course_from_filename(pdf_path.name)
-    if _is_weekly_schedule_pdf(pdf_path):
-        assignments = parse_weekly_schedule_text(text, course)
-        if assignments:
-            logger.info(
-                "Parsed %d assignment(s) from %s using weekly schedule parser.",
-                len(assignments),
-                pdf_path.name,
-            )
-            return assignments
-        return None
-    if _is_syllabus_pdf(pdf_path):
-        assignments = parse_syllabus_exam_text(text, course)
-        if assignments:
-            logger.info(
-                "Parsed %d exam(s) from %s using syllabus parser.",
-                len(assignments),
-                pdf_path.name,
-            )
-            return assignments
+    rows: list[dict[str, Any]] = []
+    rows.extend(parse_weekly_schedule_text(text, course))
+    rows.extend(parse_lab_quiz_schedule_text(text, course))
+    rows.extend(parse_due_labeled_items(text, course))
+    rows.extend(parse_syllabus_exam_text(text, course))
+    rows = _dedupe_parser_rows(rows)
+    if rows:
+        logger.info(
+            "Parsed %d item(s) from %s using local syllabus parsers.",
+            len(rows),
+            pdf_path.name,
+        )
+        return rows
     return None
+
 
 
 def _parse_gemini_response(

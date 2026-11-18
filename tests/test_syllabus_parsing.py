@@ -10,7 +10,12 @@ import pytest
 from syllasync.syllabus_module import (
     is_usable_pdf_text,
     parse_weekly_schedule_text,
+    parse_due_labeled_items,
+    parse_lab_quiz_schedule_text,
+    parse_syllabus_exam_text,
     _parse_single_pdf,
+    _parse_with_deterministic_parser,
+    _normalize_pdf_text,
     SYLLABUS_PARSE_ISSUES,
 )
 
@@ -192,3 +197,159 @@ def test_ocr_missing_deps_do_not_break_default_path(tmp_path, monkeypatch, caplo
     assert "not installed" in caplog.text
     assert "likely a scanned" in caplog.text.lower() or "scanned" in caplog.text.lower()
     assert "Gemini was not called" in caplog.text
+
+
+def test_normalize_pdf_text_repairs_ligatures_and_glued_dates():
+    from syllasync.syllabus_module import _normalize_pdf_text
+
+    glued = "Midterm 30% Oct24,12:30-2:00PM FinalExam 50% TBA"
+    cleaned = _normalize_pdf_text(glued)
+    assert "Oct 24" in cleaned
+    assert "Final Exam" in cleaned
+    assert "2:00 PM" in cleaned or "2:00PM" not in cleaned.replace(" ", "")
+    ligature = "There will be a \ufb01nal examination in December."
+    assert "final examination" in _normalize_pdf_text(ligature).lower()
+
+
+def test_exam_parser_reads_glued_midterm_typography():
+    from syllasync.config import TERM_YEAR
+    from syllasync.syllabus_module import parse_syllabus_exam_text
+
+    text = "Marking Scheme Midterm 30% Oct24,12:30-2:00PM FinalExam 50% TBA"
+    rows = parse_syllabus_exam_text(text, "COURSE 101")
+    by_task = {r["Task"]: r for r in rows}
+    assert str(by_task["Midterm"]["Due Date"]).startswith(f"{TERM_YEAR}-10-24")
+    assert "12:30" in str(by_task["Midterm"]["Due Date"])
+    assert by_task["Final Exam"]["Due Date"] in {"", "TBD", "TBA"} or str(
+        by_task["Final Exam"]["Due Date"]
+    ).upper() in {"TBD", "TBA", ""}
+
+
+def test_due_labeled_items_day_first_and_closes_on():
+    from syllasync.config import TERM_YEAR
+    from syllasync.syllabus_module import parse_due_labeled_items
+
+    text = (
+        "Assignment #1 Complete the form. Due: 16 September 2024 "
+        "Assignment #2 Attend a session. Due: sessions run through the term "
+        "but no later than December 11 "
+        "Assignment #3 Apply online. Due: December 11 at 11:59pm "
+        "Quiz #1 opens in the portal. You need to score 100%. "
+        "Quiz closes on December 11 at 11:59pm "
+        "Quiz #2 opens later. Quiz closes on December 11 at 11:59pm "
+        "Quiz #3 opens last. Quiz closes on December 11 at 11:59pm"
+    )
+    rows = parse_due_labeled_items(text, "COURSE 101")
+    by_task = {r["Task"]: r for r in rows}
+    assert str(by_task["Assignment #1"]["Due Date"]).startswith(f"{TERM_YEAR}-09-16")
+    assert str(by_task["Assignment #2"]["Due Date"]).startswith(f"{TERM_YEAR}-12-11")
+    assert str(by_task["Assignment #3"]["Due Date"]).startswith(f"{TERM_YEAR}-12-11")
+    assert str(by_task["Assignment #3"]["Due Date"]).endswith("23:59")
+    assert str(by_task["Quiz #1"]["Due Date"]).endswith("23:59")
+    assert str(by_task["Quiz #2"]["Due Date"]).startswith(f"{TERM_YEAR}-12-11")
+    assert str(by_task["Quiz #3"]["Due Date"]).startswith(f"{TERM_YEAR}-12-11")
+
+
+def test_lab_quiz_schedule_uses_range_end_and_ignores_bare_date():
+    from syllasync.config import TERM_YEAR
+    from syllasync.syllabus_module import (
+        parse_lab_quiz_schedule_text,
+        parse_weekly_schedule_text,
+    )
+
+    assert parse_lab_quiz_schedule_text("Lab Quiz 1 Sept 15", "COURSE 202") == []
+    table = (
+        "Lab Number Dates Topics Quiz "
+        "1 September 8 - September 11 Topic A No Quiz "
+        "3 September 21 - September 25 Topic B Lab Quiz 1 "
+        "5 October 5 - October 9 Topic C Lab Quiz 2 "
+        "8 October 26 - October 30 Topic D Lab Quiz 3 "
+        "10 November 16 - November 20 Topic E Lab Quiz 4 "
+        "12 November 30 - December 4 Topic F Lab Quiz 5 "
+        "13 Monday, December 7 Topic G No Quiz"
+    )
+    rows = parse_lab_quiz_schedule_text(table, "COURSE 202")
+    by_task = {r["Task"]: r for r in rows}
+    assert set(by_task) == {
+        "Lab Quiz 1",
+        "Lab Quiz 2",
+        "Lab Quiz 3",
+        "Lab Quiz 4",
+        "Lab Quiz 5",
+    }
+    assert str(by_task["Lab Quiz 1"]["Due Date"]).startswith(f"{TERM_YEAR}-09-25")
+    assert str(by_task["Lab Quiz 2"]["Due Date"]).startswith(f"{TERM_YEAR}-10-09")
+    assert str(by_task["Lab Quiz 3"]["Due Date"]).startswith(f"{TERM_YEAR}-10-30")
+    assert str(by_task["Lab Quiz 4"]["Due Date"]).startswith(f"{TERM_YEAR}-11-20")
+    assert str(by_task["Lab Quiz 5"]["Due Date"]).startswith(f"{TERM_YEAR}-12-04")
+    # Weekly homework parser still must not invent a quiz date from a bare line.
+    assert parse_weekly_schedule_text("Lab Quiz 1 Sept 15", "COURSE 202") == []
+
+
+def test_lab_quiz_tentative_block_on_syllabus():
+    from syllasync.config import TERM_YEAR
+    from syllasync.syllabus_module import parse_lab_quiz_schedule_text
+
+    text = (
+        "Lab quizzes 15% Tentative Schedule: "
+        "September 21 - September 25 "
+        "October 5 - October 9 "
+        "October 26 - October 30 "
+        "Online Assignments 5% Midterm 30% Oct 24"
+    )
+    rows = parse_lab_quiz_schedule_text(text, "COURSE 202")
+    dates = [str(r["Due Date"])[:10] for r in rows]
+    assert dates == [
+        f"{TERM_YEAR}-09-25",
+        f"{TERM_YEAR}-10-09",
+        f"{TERM_YEAR}-10-30",
+    ]
+
+
+def test_deferred_exam_wording_variants():
+    from syllasync.syllabus_module import parse_syllabus_exam_text
+
+    held = parse_syllabus_exam_text(
+        "The deferred exam for this course will be held on Jan. 9, 2027.",
+        "COURSE 101",
+    )
+    by_task = {r["Task"]: r for r in held}
+    assert str(by_task["Deferred Final Exam"]["Due Date"]).startswith("2027-01-09")
+
+    saturday = parse_syllabus_exam_text(
+        "Deferred final exam: Saturday 09 January 2027, location TBA.",
+        "COURSE 101",
+    )
+    by_task = {r["Task"]: r for r in saturday}
+    assert str(by_task["Deferred Final Exam"]["Due Date"]).startswith("2027-01-09")
+
+
+def test_deterministic_parser_combines_lab_schedule_filename(tmp_path):
+    from syllasync.config import TERM_YEAR
+    from syllasync.syllabus_module import _parse_with_deterministic_parser
+
+    pdf = tmp_path / "COURSE202_Lab_Problem_Schedule.pdf"
+    pdf.write_bytes(b"%PDF-1.4")
+    text = (
+        "1 September 8 - September 11 Intro No Quiz "
+        "3 September 21 - September 25 Review Lab Quiz 1"
+    )
+    rows = _parse_with_deterministic_parser(pdf, text)
+    assert rows is not None
+    by_task = {r["Task"]: r for r in rows}
+    assert "Lab Quiz 1" in by_task
+    assert str(by_task["Lab Quiz 1"]["Due Date"]).startswith(f"{TERM_YEAR}-09-25")
+
+def test_lab_quiz_parser_splits_glued_label():
+    from syllasync.config import TERM_YEAR
+    from syllasync.syllabus_module import parse_lab_quiz_schedule_text
+
+    text = (
+        "1 September 8 - September 11 TopicA No Quiz "
+        "5 October 5 - October 9 TopicC ProblemsLab Quiz 2"
+    )
+    rows = parse_lab_quiz_schedule_text(text, "COURSE 202")
+    assert len(rows) == 1
+    assert rows[0]["Task"] == "Lab Quiz 2"
+    assert str(rows[0]["Due Date"]).startswith(f"{TERM_YEAR}-10-09")
+
