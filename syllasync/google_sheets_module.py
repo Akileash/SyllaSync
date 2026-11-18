@@ -3,8 +3,9 @@ Push assignment data to the HHS Assignment Tracker Masterlist in Google Sheets.
 
 Requires:
   - GOOGLE_SHEET_ID in .env / local.env
-  - credentials.json service-account key in the project root
-  - Sheet shared with the service account email (Editor access)
+  - credentials.json: a service-account key (share the Sheet with client_email)
+    or a Desktop OAuth client secrets file (first run opens a browser; token.json
+    is stored locally)
 
 Integration targets the **Masterlist** tab. Columns A–H hold tracker fields;
 K–M hold Canvas Points Earned / Points Possible / Grade. Columns I–J
@@ -24,6 +25,12 @@ import pandas as pd
 from gspread.exceptions import APIError, SpreadsheetNotFound
 
 from .config import BASE_DIR, GOOGLE_SHEET_ID
+from .google_auth import (
+    AUTH_SERVICE_ACCOUNT,
+    credentials_kind,
+    load_credentials_dict,
+    load_google_credentials,
+)
 from .date_utils import (
     apply_lab_monday_due,
     format_internal_datetime,
@@ -106,11 +113,11 @@ class GoogleSheetPermissionError(PermissionError):
 
 @with_retries(label="sheets.authenticate")
 def _authenticate() -> gspread.Client:
-    """Authenticate with the service-account credentials file."""
+    """Authenticate with a service-account key or an installed-app OAuth client."""
     if not CREDENTIALS_PATH.exists():
         raise FileNotFoundError(
             f"credentials.json not found at {CREDENTIALS_PATH}. "
-            "Download a service-account key from Google Cloud Console."
+            "Use a service-account key or a Desktop OAuth client secrets file."
         )
 
     if not GOOGLE_SHEET_ID:
@@ -119,7 +126,11 @@ def _authenticate() -> gspread.Client:
         )
 
     try:
-        return gspread.service_account(filename=str(CREDENTIALS_PATH), scopes=SCOPES)
+        kind = credentials_kind(load_credentials_dict(CREDENTIALS_PATH))
+        if kind == AUTH_SERVICE_ACCOUNT:
+            return gspread.service_account(filename=str(CREDENTIALS_PATH), scopes=SCOPES)
+        creds = load_google_credentials(scopes=SCOPES)
+        return gspread.authorize(creds)
     except (OSError, ValueError, json.JSONDecodeError, UnicodeError) as exc:
         raise GoogleSheetPermissionError(explain_google_auth_failure(exc)) from exc
     except Exception as exc:
@@ -133,15 +144,16 @@ def _open_spreadsheet(client: gspread.Client) -> gspread.Spreadsheet:
         return client.open_by_key(GOOGLE_SHEET_ID)
     except SpreadsheetNotFound as exc:
         raise GoogleSheetPermissionError(
-            "Spreadsheet not found. Verify GOOGLE_SHEET_ID and ensure the sheet "
-            "is shared with your service account email as Editor."
+            "Spreadsheet not found. Verify GOOGLE_SHEET_ID. For a service "
+            "account, share the sheet with the client_email as Editor. For "
+            "OAuth, sign in with a Google account that can edit the sheet."
         ) from exc
     except APIError as exc:
         if exc.response.status_code in (403, 404):
             raise GoogleSheetPermissionError(
-                "Permission denied opening Google Sheet. Share the spreadsheet with "
-                "your service account email (from credentials.json client_email) "
-                "and grant Editor access."
+                "Permission denied opening Google Sheet. For a service account, "
+                "share the spreadsheet with the client_email and grant Editor "
+                "access. For OAuth, sign in with a Google account that can edit the sheet."
             ) from exc
         raise
 
@@ -680,8 +692,9 @@ def push_to_google_sheet(
     except APIError as exc:
         if exc.response.status_code in (403, 404):
             raise GoogleSheetPermissionError(
-                "Google Sheets API permission error. Ensure credentials.json is valid "
-                "and the spreadsheet is shared with the service account email."
+                "Google Sheets API permission error. Ensure credentials.json is valid. "
+                "For a service account, share the spreadsheet with the client_email. "
+                "For OAuth, sign in with a Google account that can edit the sheet."
             ) from exc
         logger.error("Google Sheets API error: %s", exc)
         raise
