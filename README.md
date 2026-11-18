@@ -88,14 +88,30 @@ Hide items by `task_id`:
 
 ## Scheduling
 
-Daily Task Scheduler job for `main.py --all` (default 18:00, name `SyllaSync Daily`). Logs to `logs\daily_sync.log`.
+Daily `main.py --all` at 18:00, logged to `logs/daily_sync.log`.
+
+### Windows
+
+Task Scheduler is the recommended option (task name `SyllaSync Daily`):
 
 ```powershell
 python main.py --install-schedule --time 18:00
 python main.py --uninstall-schedule
 ```
 
-Windows only. Use `--task-name` to change the task name.
+Use `--task-name` to change the task name.
+
+### macOS and Linux
+
+`python main.py --install-schedule --time 18:00` prints a cron line, plus a launchd plist (macOS) or a systemd user timer (Linux). It does not install anything. Example cron (edit the paths, then `crontab -e`):
+
+```
+0 18 * * * cd /path/to/SyllaSync && mkdir -p logs && ./venv/bin/python main.py --all >> logs/daily_sync.log 2>&1
+```
+
+On macOS, save the printed plist under `~/Library/LaunchAgents/` and `launchctl load` it. On Linux, save the printed unit and timer under `~/.config/systemd/user/` and run `systemctl --user enable --now syllasync.timer`.
+
+Or leave a process running: `python main.py --daemon --time 18:00`.
 
 ## License
 
