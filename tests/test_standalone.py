@@ -252,6 +252,18 @@ def test_env_flag_sync_grades_default_on_and_opt_out(monkeypatch):
         assert _env_flag("SYNC_GRADES", True) is False, raw
 
 
+def test_parse_stale_year_policy_defaults_to_warn(monkeypatch):
+    from syllasync.config import parse_stale_year_policy
+
+    monkeypatch.delenv("STALE_YEAR_POLICY", raising=False)
+    assert parse_stale_year_policy(None) == "warn"
+    assert parse_stale_year_policy("") == "warn"
+    assert parse_stale_year_policy("WARN") == "warn"
+    assert parse_stale_year_policy("override") == "override"
+    assert parse_stale_year_policy("SHIFT") == "shift"
+    assert parse_stale_year_policy("nope") == "warn"
+
+
 def test_merge_keeps_existing_grades_when_sync_grades_off(tmp_path, monkeypatch):
     import pandas as pd
 

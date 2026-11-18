@@ -472,7 +472,7 @@ def coerce_to_term_year(value: Any, term_year: int | None = None) -> str:
     Syllabi often omit the year, and Gemini then guesses one (e.g. 2020 because
     Sept 21 fell on a Monday that year). Sep-Dec -> term_year, Jan-Aug ->
     term_year + 1. Only for syllabus/Gemini sources, never Canvas (Canvas keeps
-    its stale-year warning for genuinely old items).
+    its stale-year warning for genuinely old items unless STALE_YEAR_POLICY=shift).
     """
     text = str(value or "").strip()
     m = re.match(r"^(\d{4})-(\d{2})-(\d{2})(.*)$", text)
