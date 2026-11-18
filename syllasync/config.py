@@ -79,6 +79,11 @@ def _env_flag(name: str, default: bool = True) -> bool:
 # leave those columns as they are.
 SYNC_GRADES = _env_flag("SYNC_GRADES", True)
 
+# Optional OCR for image-only syllabus PDFs. Off by default. Requires
+# Tesseract plus the pdf2image and pytesseract packages; missing deps
+# are skipped and do not break a normal install.
+SYLLABUS_OCR = _env_flag("SYLLABUS_OCR", False)
+
 STALE_YEAR_POLICIES = frozenset({"warn", "override", "shift"})
 
 

@@ -39,7 +39,7 @@ from .google_sheets_module import (
     push_from_records,
 )
 from .sheets_module import update_sheet
-from .syllabus_module import fetch_syllabus_assignments
+from .syllabus_module import SYLLABUS_PARSE_ISSUES, fetch_syllabus_assignments
 
 logging.basicConfig(
     level=logging.INFO,
@@ -549,6 +549,13 @@ def main() -> None:
             canvas_failed = True
     except CanvasFetchError:
         sys.exit(1)
+
+    if SYLLABUS_PARSE_ISSUES:
+        print(
+            f"      Warning: {len(SYLLABUS_PARSE_ISSUES)} syllabus file(s) could not be read fully:"
+        )
+        for item in SYLLABUS_PARSE_ISSUES:
+            print(f"        - {item['file']}: {item['reason']}")
 
     sheet_degraded = canvas_failed
 

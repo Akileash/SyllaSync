@@ -46,9 +46,9 @@ Or copy `examples/.env.example` to `.env` and edit it (UTF-8). Never commit real
 
 Required for `--all`: `CANVAS_URL`, `CANVAS_TOKEN`, `GOOGLE_SHEET_ID`, `GOOGLE_CALENDAR_ID`, `DISCORD_WEBHOOK_URL`
 
-Optional: `GEMINI_API_KEY`, `GEMINI_MODEL`, `ALLOWED_COURSES`, `LOCAL_TIMEZONE`, `TERM_YEAR`, `CANVAS_PAST_DUE_DAYS`, `EXCEL_FILE_PATH`, `SYNC_GRADES`, `STALE_YEAR_POLICY`
+Optional: `GEMINI_API_KEY`, `GEMINI_MODEL`, `ALLOWED_COURSES`, `LOCAL_TIMEZONE`, `TERM_YEAR`, `CANVAS_PAST_DUE_DAYS`, `EXCEL_FILE_PATH`, `SYNC_GRADES`, `STALE_YEAR_POLICY`, `SYLLABUS_OCR`
 
-`local.env` overrides `.env`. Fill sections in `schedule.json`.
+`local.env` overrides `.env`. Fill sections in `schedule.json`. Scanned syllabi with no text layer are skipped and Gemini is not called on blank input. `SYLLABUS_OCR=1` can try Tesseract if `pdf2image` and `pytesseract` are installed; it is off by default and missing tools are skipped.
 
 ```
 python main.py --check --all
