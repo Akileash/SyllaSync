@@ -46,6 +46,7 @@ ALLOWED_COURSES = os.getenv("ALLOWED_COURSES", "")
 GOOGLE_CALENDAR_ID = (os.getenv("GOOGLE_CALENDAR_ID") or "").strip()
 SCHEDULE_PATH = BASE_DIR / "schedule.json"
 CREDENTIALS_PATH = BASE_DIR / "credentials.json"
+TOKEN_PATH = BASE_DIR / "token.json"
 
 # Optional Gemini model override (google-genai SDK)
 GEMINI_MODEL = (os.getenv("GEMINI_MODEL") or "gemini-3.6-flash").strip()
@@ -124,6 +125,7 @@ _PLACEHOLDER_MARKERS = (
     "replace_with_your_key",
     "your-private-key-id",
     "your-client-id",
+    "your-oauth-client",
     "changeme",
     "paste_here",
     "todo_replace",
@@ -206,13 +208,21 @@ def _timezone_ok(name: str) -> bool:
 
 
 def _credentials_issues(*, required: bool) -> list[ConfigIssue]:
-    """Inspect credentials.json without printing the private key or client email."""
+    """Inspect credentials.json without printing secrets, keys, or emails."""
+    from .google_auth import (
+        AUTH_OAUTH,
+        AUTH_SERVICE_ACCOUNT,
+        credentials_kind,
+        oauth_client_block,
+    )
+
     path = CREDENTIALS_PATH
     if not path.exists():
         message = (
-            "credentials.json is missing. In Google Cloud Console create a service "
-            "account, enable the Sheets API and Calendar API, download a JSON key, "
-            "and save it as credentials.json in the project folder. Do not commit it."
+            "credentials.json is missing. In Google Cloud Console enable the "
+            "Sheets API and Calendar API, then save either a service-account "
+            "JSON key or a Desktop OAuth client secrets file as credentials.json. "
+            "Do not commit it."
         )
         if required:
             return [ConfigIssue("error", "credentials.json", message)]
@@ -226,8 +236,9 @@ def _credentials_issues(*, required: bool) -> list[ConfigIssue]:
             ConfigIssue(
                 "error",
                 "credentials.json",
-                "credentials.json is not valid UTF-8 JSON. Download a new service-account "
-                "key. The file contents were not logged.",
+                "credentials.json is not valid UTF-8 JSON. Download a new "
+                "service-account key or OAuth client secrets file. "
+                "The file contents were not logged.",
             )
         ]
 
@@ -236,20 +247,39 @@ def _credentials_issues(*, required: bool) -> list[ConfigIssue]:
             ConfigIssue(
                 "error",
                 "credentials.json",
-                "credentials.json must be a JSON object (a service-account key).",
+                "credentials.json must be a JSON object (a service-account key "
+                "or an OAuth client secrets file).",
             )
         ]
 
-    issues: list[ConfigIssue] = []
-    if str(data.get("type") or "") != "service_account":
-        issues.append(
-            ConfigIssue(
-                "error",
-                "credentials.json",
-                "credentials.json is not a service-account key (type must be "
-                "service_account). OAuth client secrets from a desktop app will not work.",
+    kind = credentials_kind(data)
+    if kind == AUTH_SERVICE_ACCOUNT:
+        return _service_account_credential_issues(data)
+    if kind == AUTH_OAUTH:
+        issues = _oauth_client_credential_issues(data, oauth_client_block)
+        if required and not any(item.level == "error" for item in issues) and not TOKEN_PATH.is_file():
+            issues.append(
+                ConfigIssue(
+                    "warn",
+                    "token.json",
+                    "token.json is not present yet. The first Sheets or Calendar "
+                    "run will open a browser to sign in. If the OAuth client is "
+                    "in testing mode, add your Google account as a test user.",
+                )
             )
+        return issues
+    return [
+        ConfigIssue(
+            "error",
+            "credentials.json",
+            "credentials.json must be a service-account key (type "
+            "service_account) or an installed-app / web OAuth client secrets file.",
         )
+    ]
+
+
+def _service_account_credential_issues(data: dict) -> list[ConfigIssue]:
+    issues: list[ConfigIssue] = []
     for field in ("client_email", "private_key", "token_uri"):
         if not str(data.get(field) or "").strip():
             issues.append(
@@ -269,6 +299,41 @@ def _credentials_issues(*, required: bool) -> list[ConfigIssue]:
                 "credentials.json",
                 "credentials.json still contains example placeholder values. "
                 "Replace it with the JSON key downloaded from Google Cloud.",
+            )
+        )
+    return issues
+
+
+def _oauth_client_credential_issues(data: dict, block_fn) -> list[ConfigIssue]:
+    block = block_fn(data)
+    if not isinstance(block, dict):
+        return [
+            ConfigIssue(
+                "error",
+                "credentials.json",
+                "OAuth client secrets file is missing the installed or web client block.",
+            )
+        ]
+    issues: list[ConfigIssue] = []
+    for field in ("client_id", "client_secret", "token_uri"):
+        if not str(block.get(field) or "").strip():
+            issues.append(
+                ConfigIssue(
+                    "error",
+                    "credentials.json",
+                    f"credentials.json is missing '{field}'. Download a new "
+                    "Desktop OAuth client secrets file. The field value was not logged.",
+                )
+            )
+    client_id = str(block.get("client_id") or "")
+    client_secret = str(block.get("client_secret") or "")
+    if is_placeholder(client_id) or is_placeholder(client_secret):
+        issues.append(
+            ConfigIssue(
+                "error",
+                "credentials.json",
+                "credentials.json still contains example placeholder values. "
+                "Replace it with the OAuth client secrets file from Google Cloud.",
             )
         )
     return issues

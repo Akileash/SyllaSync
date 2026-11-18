@@ -29,7 +29,12 @@ pip install -r requirements.txt
 cp examples/schedule.example.json schedule.json
 ```
 
-Put a Google service-account key in `credentials.json` (shape: `examples/credentials.json.example`). Share the Sheet (Editor) and Calendar (Make changes to events) with `client_email`. Tab name: `Masterlist`. Notes: `docs/google-sheet-instructions/`.
+Put Google credentials in `credentials.json` (gitignored). Two options:
+
+- Service account: download a JSON key (`examples/credentials.json.example`). Share the Sheet (Editor) and Calendar (Make changes to events) with `client_email`.
+- Installed-app OAuth: download a Desktop client secrets file (`examples/credentials.oauth.json.example`). The first Sheets or Calendar run opens a browser and stores a refresh token in `token.json` (also gitignored). If the OAuth client is in testing mode, add your Google account as a test user. You do not share the Sheet or Calendar with a service account.
+
+Tab name: `Masterlist`. Notes: `docs/google-sheet-instructions/`.
 
 Then run the setup wizard (writes `.env`, does not print secrets, does not change `credentials.json`):
 
@@ -64,7 +69,7 @@ python main.py --all
 
 `--all` sends assignment titles and due dates to your Google Sheet and Calendar. Canvas grades go in Sheet columns K-M unless you set `SYNC_GRADES=0` (default is on, so nothing changes if you leave it). If `DISCORD_WEBHOOK_URL` is set, the weekly digest posts upcoming course, title, due date, and priority to that webhook. If `GEMINI_API_KEY` is set, extracted syllabus text is sent to Gemini; leave it unset to parse locally.
 
-Secrets stay in `.env`, `local.env`, and `credentials.json` on this machine. Those files are gitignored. `--check` and the logs print variable names only, never the values. You can set the same names as environment variables instead of putting them in a file (`.env` will not overwrite ones already set).
+Secrets stay in `.env`, `local.env`, `credentials.json`, and `token.json` on this machine. Those files are gitignored. `--check` and the logs print variable names only, never the values. You can set the same names as environment variables instead of putting them in a file (`.env` will not overwrite ones already set).
 
 ## Optional local JSON
 

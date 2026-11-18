@@ -1,8 +1,9 @@
 """Interactive first-run setup: write .env from prompts.
 
-Stdlib only. Never prints secret values. Does not read or write
-credentials.json, except to show a service-account client_email so the
-user knows who to share the Sheet and Calendar with.
+Stdlib only, plus a credentials-type helper. Never prints secret values.
+Does not write credentials.json. For a service-account key, shows
+client_email so the user knows who to share with. For an OAuth client,
+explains the browser sign-in and test-user requirement.
 """
 
 from __future__ import annotations
@@ -12,6 +13,8 @@ import json
 import re
 from collections.abc import Callable
 from pathlib import Path
+
+from .google_auth import AUTH_OAUTH, AUTH_SERVICE_ACCOUNT, credentials_kind
 
 SECRET_KEYS = frozenset(
     {"CANVAS_TOKEN", "GEMINI_API_KEY", "DISCORD_WEBHOOK_URL"}
@@ -287,28 +290,57 @@ def run_setup(
 
     _copy_schedule_if_missing(repo, out)
 
-    if creds_path.is_file():
-        email = read_client_email(creds_path)
-        if email:
-            out(
-                "Share the Sheet (Editor) and Calendar (Make changes to events) "
-                f"with {email}."
-            )
-        else:
-            out(
-                "credentials.json is present, but no client_email was found. "
-                "Share the Sheet and Calendar with the service account email."
-            )
-    else:
-        out(
-            "Put a Google service-account key in credentials.json "
-            "(see examples/credentials.json.example). Share the Sheet (Editor) "
-            "and Calendar (Make changes to events) with its client_email."
-        )
+    out(_credentials_hint(creds_path))
 
     out("Next: python main.py --check --all")
     out("Then preview with: python main.py --all --dry-run")
     return 0
+
+
+
+def _credentials_hint(creds_path: Path) -> str:
+    """Describe which credentials.json type was found. Never prints secrets."""
+    if not creds_path.is_file():
+        return (
+            "Put credentials.json in the project folder: a service-account key "
+            "(examples/credentials.json.example) or a Desktop OAuth client secrets "
+            "file (examples/credentials.oauth.json.example). This wizard does not "
+            "write credentials.json. For a service account, share the Sheet (Editor) "
+            "and Calendar (Make changes to events) with its client_email. For OAuth, "
+            "the first Sheets or Calendar run opens a browser; if the client is in "
+            "testing mode, add your Google account as a test user."
+        )
+    try:
+        data = json.loads(creds_path.read_text(encoding="utf-8-sig"))
+        kind = credentials_kind(data)
+    except (OSError, UnicodeError, json.JSONDecodeError, TypeError):
+        return (
+            "credentials.json is present but could not be read. It is not changed. "
+            "Use a service-account key or a Desktop OAuth client secrets file."
+        )
+    if kind == AUTH_SERVICE_ACCOUNT:
+        email = read_client_email(creds_path)
+        if email:
+            return (
+                "Share the Sheet (Editor) and Calendar (Make changes to events) "
+                f"with {email}."
+            )
+        return (
+            "credentials.json is a service-account key, but no client_email was "
+            "found. Share the Sheet and Calendar with the service account email."
+        )
+    if kind == AUTH_OAUTH:
+        return (
+            "credentials.json is an OAuth client. The first Sheets or Calendar "
+            "run will open a browser and save token.json. If the client is in "
+            "testing mode, add your Google account as a test user. You do not "
+            "need to share the Sheet or Calendar with a service account."
+        )
+    return (
+        "credentials.json is present, but it is not a service-account key or "
+        "an installed-app / web OAuth client. See "
+        "examples/credentials.json.example or examples/credentials.oauth.json.example."
+    )
 
 
 def main() -> None:

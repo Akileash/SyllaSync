@@ -23,6 +23,12 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
 from .config import BASE_DIR, GOOGLE_CALENDAR_ID
+from .google_auth import (
+    AUTH_SERVICE_ACCOUNT,
+    credentials_kind,
+    load_credentials_dict,
+    load_google_credentials,
+)
 from .course_utils import normalize_course_code
 from .date_utils import apply_lab_monday_due, calendar_event_bounds, split_title_and_due
 from .dedupe_module import (
@@ -58,7 +64,7 @@ def _authenticate():
     if not CREDENTIALS_PATH.exists():
         raise FileNotFoundError(
             f"credentials.json not found at {CREDENTIALS_PATH}. "
-            "Download a service-account key from Google Cloud Console."
+            "Use a service-account key or a Desktop OAuth client secrets file."
         )
     if not GOOGLE_CALENDAR_ID:
         raise ValueError(
@@ -72,9 +78,13 @@ def _authenticate():
             "Settings -> Integrate calendar."
         )
 
-    creds = service_account.Credentials.from_service_account_file(
-        str(CREDENTIALS_PATH), scopes=SCOPES
-    )
+    kind = credentials_kind(load_credentials_dict(CREDENTIALS_PATH))
+    if kind == AUTH_SERVICE_ACCOUNT:
+        creds = service_account.Credentials.from_service_account_file(
+            str(CREDENTIALS_PATH), scopes=SCOPES
+        )
+    else:
+        creds = load_google_credentials(scopes=SCOPES)
     return build("calendar", "v3", credentials=creds, cache_discovery=False)
 
 
@@ -424,11 +434,11 @@ def push_to_google_calendar(
         status = getattr(exc.resp, "status", None)
         if status in (403, 404):
             raise GoogleCalendarPermissionError(
-                "Cannot access Google Calendar. Share the calendar with the "
-                "service account client_email from credentials.json "
-                "(permission: 'Make changes to events'), set GOOGLE_CALENDAR_ID "
-                "to your email or calendar ID (not an iCal URL), and enable "
-                "the Google Calendar API in GCP."
+                "Cannot access Google Calendar. Set GOOGLE_CALENDAR_ID to your "
+                "email or calendar ID (not an iCal URL) and enable the Google "
+                "Calendar API in GCP. For a service account, share the calendar "
+                "with the client_email (permission: 'Make changes to events'). "
+                "For OAuth, sign in with a Google account that can edit the calendar."
             ) from exc
         raise
 

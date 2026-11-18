@@ -223,3 +223,35 @@ def test_run_setup_does_not_create_credentials(tmp_path):
     assert (repo / ".env").is_file()
     assert "SYNC_GRADES=0" in (repo / ".env").read_text(encoding="utf-8")
     assert not (repo / "credentials.json").exists()
+
+
+def test_run_setup_explains_oauth_client_without_printing_secret(tmp_path, capsys):
+    repo = tmp_path
+    (repo / ".env").write_text(
+        f"CANVAS_URL=https://school.example.edu\nCANVAS_TOKEN={SECRET}\n"
+        "GOOGLE_SHEET_ID=sheet-id\nGOOGLE_CALENDAR_ID=user@example.edu\n"
+        "LOCAL_TIMEZONE=America/Edmonton\nTERM_YEAR=2026\nSYNC_GRADES=1\n",
+        encoding="utf-8",
+    )
+    oauth_secret = "test-only-oauth-client-secret"
+    payload = {
+        "installed": {
+            "client_id": "100000000000-testonly.apps.googleusercontent.com",
+            "client_secret": oauth_secret,
+            "token_uri": "https://oauth2.googleapis.com/token",
+        }
+    }
+    (repo / "credentials.json").write_text(json.dumps(payload), encoding="utf-8")
+    input_fn = _answers("y", "y", "y", "y", "y", "y", "y")
+    code = run_setup(repo, input_fn=input_fn, secret_fn=lambda _p: "")
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "OAuth client" in out
+    assert "test user" in out
+    assert "service account" in out.lower()
+    assert oauth_secret not in out
+    assert "100000000000-testonly" not in out
+    assert SECRET not in out
+    saved = json.loads((repo / "credentials.json").read_text(encoding="utf-8"))
+    assert saved == payload
+    assert not (repo / "token.json").exists()
