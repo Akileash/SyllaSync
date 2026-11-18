@@ -84,6 +84,56 @@ SYNC_GRADES = _env_flag("SYNC_GRADES", True)
 # are skipped and do not break a normal install.
 SYLLABUS_OCR = _env_flag("SYLLABUS_OCR", False)
 
+DEFAULT_SHEET_TAB_NAME = "Masterlist"
+DEFAULT_SHEET_META_TAB_NAME = "SyllaSync_Meta"
+DEFAULT_SHEET_DATA_START_ROW = 11
+
+
+def parse_sheet_tab_name(
+    value: object, default: str = DEFAULT_SHEET_TAB_NAME
+) -> str:
+    """Return a non-empty worksheet name. Blank values use *default*."""
+    raw = str(value or "").strip()
+    return raw or default
+
+
+def parse_sheet_data_start_row(
+    value: object,
+    *,
+    default: int = DEFAULT_SHEET_DATA_START_ROW,
+    warn: bool = False,
+) -> int:
+    """Return a 1-based start row. Invalid or empty values use *default*."""
+    raw = str(value or "").strip()
+    if not raw:
+        return default
+    try:
+        number = int(raw)
+    except ValueError:
+        number = 0
+    if number < 1:
+        if warn:
+            print(
+                "Warning: SHEET_DATA_START_ROW must be a positive integer; "
+                f"using {default}. The value was not logged.",
+                file=sys.stderr,
+            )
+        return default
+    return number
+
+
+# Default layout matches the current Masterlist template so existing
+# workbooks keep working with no .env changes. A simple sheet can set
+# SHEET_DATA_START_ROW=2 and put headers in row 1. Columns stay A-H
+# and K-M; I-J are never written.
+SHEET_TAB_NAME = parse_sheet_tab_name(os.getenv("SHEET_TAB_NAME"))
+SHEET_META_TAB_NAME = parse_sheet_tab_name(
+    os.getenv("SHEET_META_TAB_NAME"), DEFAULT_SHEET_META_TAB_NAME
+)
+SHEET_DATA_START_ROW = parse_sheet_data_start_row(
+    os.getenv("SHEET_DATA_START_ROW"), warn=True
+)
+
 STALE_YEAR_POLICIES = frozenset({"warn", "override", "shift"})
 
 
@@ -403,6 +453,28 @@ def _url_issue(name: str, value: str, *, kind: str) -> ConfigIssue | None:
     return None
 
 
+
+def _sheet_layout_issues() -> list[ConfigIssue]:
+    """Validate optional sheet-layout overrides. Defaults need no check."""
+    issues: list[ConfigIssue] = []
+    raw_row = os.getenv("SHEET_DATA_START_ROW")
+    if raw_row is not None and str(raw_row).strip():
+        try:
+            number = int(str(raw_row).strip())
+        except ValueError:
+            number = 0
+        if number < 1:
+            issues.append(
+                ConfigIssue(
+                    "error",
+                    "SHEET_DATA_START_ROW",
+                    "SHEET_DATA_START_ROW must be a positive integer (default 11). "
+                    "The value was not logged.",
+                )
+            )
+    return issues
+
+
 def collect_config_issues(
     *,
     require_discord: bool = False,
@@ -546,6 +618,7 @@ def collect_config_issues(
             )
         )
 
+    issues.extend(_sheet_layout_issues())
     issues.extend(_credentials_issues(required=require_google or require_calendar))
 
     if not SCHEDULE_PATH.exists():

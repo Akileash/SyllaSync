@@ -1,5 +1,5 @@
 """
-Push assignment data to the HHS Assignment Tracker Masterlist in Google Sheets.
+Push assignment data to a Google Sheet.
 
 Requires:
   - GOOGLE_SHEET_ID in .env / local.env
@@ -7,10 +7,14 @@ Requires:
     or a Desktop OAuth client secrets file (first run opens a browser; token.json
     is stored locally)
 
-Integration targets the **Masterlist** tab. Columns A–H hold tracker fields;
-K–M hold Canvas Points Earned / Points Possible / Grade. Columns I–J
-(formulas / checkboxes) are never modified. Column A stores Sylla Sync Task_ID.
-A companion SyllaSync_Meta sheet mirrors Task_ID for cross-machine hydration.
+The default layout matches the current Masterlist template: tab Masterlist,
+data from row 11, columns A–H (tracker fields) and K–M (Canvas points/grade).
+Override with SHEET_TAB_NAME, SHEET_DATA_START_ROW, and SHEET_META_TAB_NAME.
+Rows above the start row are left alone, so a simple sheet can use start row 2
+with headers in row 1. Columns I–J (formulas / checkboxes) are never modified.
+Column A stores Sylla Sync Task_ID. A companion meta tab (default
+SyllaSync_Meta) mirrors Task_ID for cross-machine hydration. Missing tabs are
+not created automatically.
 """
 
 from __future__ import annotations
@@ -24,7 +28,7 @@ import gspread
 import pandas as pd
 from gspread.exceptions import APIError, SpreadsheetNotFound
 
-from .config import BASE_DIR, GOOGLE_SHEET_ID
+from .config import BASE_DIR, GOOGLE_SHEET_ID, SHEET_DATA_START_ROW, SHEET_META_TAB_NAME, SHEET_TAB_NAME
 from .google_auth import (
     AUTH_SERVICE_ACCOUNT,
     credentials_kind,
@@ -68,12 +72,13 @@ DISPLAY_COLUMNS = [
 ]
 COLUMNS = DISPLAY_COLUMNS + [TASK_ID_COL, "Is Draft", *GRADE_COLUMNS]
 
-# HHS Assignment Tracker — Masterlist layout
-MASTERLIST_SHEET = "Masterlist"
-META_SHEET = "SyllaSync_Meta"
-DATA_START_ROW = 11
+# Default layout matches the current Masterlist template. Functions read
+# these module attributes at runtime so tests can override them.
+MASTERLIST_SHEET = SHEET_TAB_NAME
+META_SHEET = SHEET_META_TAB_NAME
+DATA_START_ROW = SHEET_DATA_START_ROW
 
-# 1-based column indices on Masterlist (A=1)
+# 1-based column indices (A=1). This column order is fixed.
 COL_TASK_ID = 1  # A — Sylla Sync Task_ID (dedicated persistence column)
 COL_STATUS = 2  # B
 COL_DUE_DATE = 3  # C
@@ -86,6 +91,31 @@ COL_ASSIGNMENT = 8  # H
 COL_POINTS_EARNED = 11  # K
 COL_POINTS_POSSIBLE = 12  # L
 COL_GRADE = 13  # M
+
+
+def missing_tab_message(tab: str | None = None) -> str:
+    """Explain a missing data tab without requiring a specific template."""
+    name = MASTERLIST_SHEET if tab is None else tab
+    return (
+        f"Worksheet '{name}' not found. Set SHEET_TAB_NAME to your tab name, "
+        "or add a tab with that name. Data starts at row "
+        f"{DATA_START_ROW} (SHEET_DATA_START_ROW). Required columns: "
+        "A Task_ID, B Status, C Due date, D Due date, E Due time, F Course, "
+        "G Type, H Title; K–M grades. I–J are left untouched."
+    )
+
+
+def sheet_layout_help() -> str:
+    """Short setup/README note for optional layout variables."""
+    return (
+        "Sheet layout defaults to tab Masterlist, data from row 11, columns "
+        "A–H and K–M (I–J are left alone). Set SHEET_TAB_NAME and "
+        "SHEET_DATA_START_ROW for a different tab or a simple header-plus-rows "
+        "sheet (SHEET_DATA_START_ROW=2, headers in row 1). Optional companion "
+        "tab: SHEET_META_TAB_NAME (default SyllaSync_Meta). Missing tabs are "
+        "not created automatically."
+    )
+
 
 CREDENTIALS_PATH = BASE_DIR / "credentials.json"
 # open_by_key talks to the Sheets API only; the full Drive scope is not needed.
@@ -164,10 +194,7 @@ def _open_masterlist(client: gspread.Client) -> gspread.Worksheet:
     try:
         return spreadsheet.worksheet(MASTERLIST_SHEET)
     except gspread.WorksheetNotFound as exc:
-        raise GoogleSheetPermissionError(
-            f"Worksheet '{MASTERLIST_SHEET}' not found. "
-            "Ensure you are using the HHS Assignment Tracker template."
-        ) from exc
+        raise GoogleSheetPermissionError(missing_tab_message()) from exc
 
 
 def _ensure_meta_sheet(spreadsheet: gspread.Spreadsheet) -> gspread.Worksheet:
@@ -360,10 +387,7 @@ def load_from_google_sheet(*, dry_run: bool = False) -> pd.DataFrame:
         try:
             worksheet = spreadsheet.worksheet(MASTERLIST_SHEET)
         except gspread.WorksheetNotFound as exc:
-            raise GoogleSheetPermissionError(
-                f"Worksheet '{MASTERLIST_SHEET}' not found. "
-                "Use the HHS Assignment Tracker template, which has a Masterlist tab."
-            ) from exc
+            raise GoogleSheetPermissionError(missing_tab_message()) from exc
     except GoogleSheetPermissionError:
         raise
     except Exception as exc:
@@ -492,23 +516,13 @@ def _write_meta_sheet(
     meta.update(values=rows, range_name="A1", value_input_option="USER_ENTERED")
 
 
-def _write_masterlist_rows(
-    worksheet: gspread.Worksheet,
+
+def _build_masterlist_updates(
     merged_df: pd.DataFrame,
     existing_rows: dict[tuple[str, str], list[int]],
     next_empty_row: int,
-    *,
-    dry_run: bool = False,
-) -> int:
-    """
-    Write merged data to Masterlist columns A–H and grade columns K–M.
-    Active rows are ordered soonest-due first; Submitted and other finished rows sink to the bottom.
-    Formula / checkbox columns (I–J) are left untouched.
-    """
-    if merged_df.empty:
-        logger.warning("No assignment data to write to Masterlist.")
-        return 0
-
+) -> tuple[list[dict[str, Any]], int, int]:
+    """Plan A-H / K-M writes starting at DATA_START_ROW. Rows above it are not touched."""
     sorted_df = sort_by_days_until_due(merged_df)
 
     updates: list[dict[str, Any]] = []
@@ -575,7 +589,29 @@ def _write_masterlist_rows(
     by_range: dict[str, dict[str, Any]] = {}
     for item in updates:
         by_range[item["range"]] = item
-    updates = list(by_range.values())
+    return list(by_range.values()), written, graded_rows
+
+
+def _write_masterlist_rows(
+    worksheet: gspread.Worksheet,
+    merged_df: pd.DataFrame,
+    existing_rows: dict[tuple[str, str], list[int]],
+    next_empty_row: int,
+    *,
+    dry_run: bool = False,
+) -> int:
+    """
+    Write merged data to Masterlist columns A–H and grade columns K–M.
+    Active rows are ordered soonest-due first; Submitted and other finished rows sink to the bottom.
+    Formula / checkbox columns (I–J) are left untouched.
+    """
+    if merged_df.empty:
+        logger.warning("No assignment data to write to Masterlist.")
+        return 0
+
+    updates, written, graded_rows = _build_masterlist_updates(
+        merged_df, existing_rows, next_empty_row
+    )
 
     if dry_run:
         logger.info(
@@ -666,7 +702,10 @@ def push_to_google_sheet(
     try:
         client = _authenticate()
         spreadsheet = _open_spreadsheet(client)
-        worksheet = spreadsheet.worksheet(MASTERLIST_SHEET)
+        try:
+            worksheet = spreadsheet.worksheet(MASTERLIST_SHEET)
+        except gspread.WorksheetNotFound as exc:
+            raise GoogleSheetPermissionError(missing_tab_message()) from exc
 
         existing_rows, next_empty_row = _load_masterlist_with_rows(worksheet)
         written = _write_masterlist_rows(

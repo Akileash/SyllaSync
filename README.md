@@ -34,7 +34,7 @@ Put Google credentials in `credentials.json` (gitignored). Two options:
 - Service account: download a JSON key (`examples/credentials.json.example`). Share the Sheet (Editor) and Calendar (Make changes to events) with `client_email`.
 - Installed-app OAuth: download a Desktop client secrets file (`examples/credentials.oauth.json.example`). The first Sheets or Calendar run opens a browser and stores a refresh token in `token.json` (also gitignored). If the OAuth client is in testing mode, add your Google account as a test user. You do not share the Sheet or Calendar with a service account.
 
-Tab name: `Masterlist`. Notes: `docs/google-sheet-instructions/`.
+Default sheet tab is `Masterlist`, with data from row 11 (columns A–H and K–M; I–J are left alone). Set `SHEET_TAB_NAME` and `SHEET_DATA_START_ROW` for a different tab or a simple header-plus-rows sheet (start row 2, headers in row 1). Optional companion tab: `SHEET_META_TAB_NAME` (default `SyllaSync_Meta`). Missing tabs are not created automatically. Notes: `docs/google-sheet-instructions/`.
 
 Then run the setup wizard (writes `.env`, does not print secrets, does not change `credentials.json`):
 
@@ -46,7 +46,7 @@ Or copy `examples/.env.example` to `.env` and edit it (UTF-8). Never commit real
 
 Required for `--all`: `CANVAS_URL`, `CANVAS_TOKEN`, `GOOGLE_SHEET_ID`, `GOOGLE_CALENDAR_ID`, `DISCORD_WEBHOOK_URL`
 
-Optional: `GEMINI_API_KEY`, `GEMINI_MODEL`, `ALLOWED_COURSES`, `LOCAL_TIMEZONE`, `TERM_YEAR`, `CANVAS_PAST_DUE_DAYS`, `EXCEL_FILE_PATH`, `SYNC_GRADES`, `STALE_YEAR_POLICY`, `SYLLABUS_OCR`
+Optional: `GEMINI_API_KEY`, `GEMINI_MODEL`, `ALLOWED_COURSES`, `LOCAL_TIMEZONE`, `TERM_YEAR`, `CANVAS_PAST_DUE_DAYS`, `EXCEL_FILE_PATH`, `SYNC_GRADES`, `STALE_YEAR_POLICY`, `SYLLABUS_OCR`, `SHEET_TAB_NAME`, `SHEET_DATA_START_ROW`, `SHEET_META_TAB_NAME`
 
 `local.env` overrides `.env`. Fill sections in `schedule.json`. Scanned syllabi with no text layer are skipped and Gemini is not called on blank input. `SYLLABUS_OCR=1` can try Tesseract if `pdf2image` and `pytesseract` are installed; it is off by default and missing tools are skipped.
 

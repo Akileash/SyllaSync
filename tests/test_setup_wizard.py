@@ -76,7 +76,7 @@ def test_read_client_email_returns_email_only(tmp_path):
 
 def test_collect_values_keeps_secret_without_printing():
     printed: list[str] = []
-    answers = iter(["y"] * 9)
+    answers = iter(["y"] * 11)
 
     def input_fn(_prompt: str) -> str:
         return next(answers)
@@ -94,6 +94,8 @@ def test_collect_values_keeps_secret_without_printing():
         "LOCAL_TIMEZONE": "America/Edmonton",
         "TERM_YEAR": "2026",
         "SYNC_GRADES": "1",
+        "SHEET_TAB_NAME": "Masterlist",
+        "SHEET_DATA_START_ROW": "11",
     }
 
     result = collect_values(
@@ -140,11 +142,14 @@ def test_run_setup_creates_env_without_printing_secrets(tmp_path, capsys):
     def secret_fn(_prompt: str) -> str:
         return next(secrets)
 
-    # URL, sheet, calendar, timezone (default), term (skip), grades (default Y)
+    # URL, sheet, calendar, timezone (default), term (skip), grades (default Y),
+    # tab name (default), start row (default)
     input_fn = _answers(
         "https://school.example.edu",
         "sheet-id-123",
         "user@example.edu",
+        "",
+        "",
         "",
         "",
         "",
@@ -158,11 +163,14 @@ def test_run_setup_creates_env_without_printing_secrets(tmp_path, capsys):
     assert "GOOGLE_CALENDAR_ID=user@example.edu" in text
     assert "LOCAL_TIMEZONE=America/Edmonton" in text
     assert "SYNC_GRADES=1" in text
+    assert "SHEET_TAB_NAME=Masterlist" in text
+    assert "SHEET_DATA_START_ROW=11" in text
     assert "# GEMINI_API_KEY=" in text or "GEMINI_API_KEY=" not in text.split("# GEMINI_API_KEY")[0]
     assert (repo / "schedule.json").is_file()
     out = capsys.readouterr().out
     assert SECRET not in out
     assert "Wrote .env" in out
+    assert "SHEET_DATA_START_ROW" in out
     assert "python main.py --check --all" in out
 
 
@@ -184,8 +192,9 @@ def test_run_setup_keeps_or_overwrites_existing_fields(tmp_path, capsys):
     def secret_fn(_prompt: str) -> str:
         return next(secrets)
 
-    # keep url, replace token, keep sheet, calendar, webhook, tz, term, grades
-    input_fn = _answers("y", "n", "y", "y", "y", "y", "y", "y")
+    # keep url, replace token, keep sheet, calendar, webhook, tz, term, grades;
+    # new layout fields default on blank
+    input_fn = _answers("y", "n", "y", "y", "y", "y", "y", "y", "", "")
     code = run_setup(repo, input_fn=input_fn, secret_fn=secret_fn)
     assert code == 0
     text = (repo / ".env").read_text(encoding="utf-8")
@@ -214,6 +223,8 @@ def test_run_setup_does_not_create_credentials(tmp_path):
         "",
         "",
         "n",
+        "",
+        "",
     )
     secrets = iter(["test-only-token", "", ""])
 
@@ -242,7 +253,7 @@ def test_run_setup_explains_oauth_client_without_printing_secret(tmp_path, capsy
         }
     }
     (repo / "credentials.json").write_text(json.dumps(payload), encoding="utf-8")
-    input_fn = _answers("y", "y", "y", "y", "y", "y", "y")
+    input_fn = _answers("y", "y", "y", "y", "y", "y", "y", "", "")
     code = run_setup(repo, input_fn=input_fn, secret_fn=lambda _p: "")
     assert code == 0
     out = capsys.readouterr().out
