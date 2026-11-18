@@ -11,7 +11,7 @@ from typing import Any
 
 from PyPDF2 import PdfReader
 
-from .config import BASE_DIR, GEMINI_API_KEY, GEMINI_MODEL, TERM_YEAR
+from .config import BASE_DIR, GEMINI_API_KEY, GEMINI_MODEL, SYLLABUS_OCR, TERM_YEAR
 from .course_utils import normalize_course_code
 from .date_utils import coerce_to_term_year, split_title_and_due
 from .retry_utils import with_retries
@@ -19,6 +19,10 @@ from .retry_utils import with_retries
 logger = logging.getLogger(__name__)
 
 SYLLABI_DIR = BASE_DIR / "syllabi"
+MIN_USABLE_LETTERS = 24
+# Filled by fetch_syllabus_assignments so the run summary can list
+# scanned PDFs and Gemini failures that produced no local rows.
+SYLLABUS_PARSE_ISSUES: list[dict[str, str]] = []
 
 MONTH_MAP = {
     "jan": 1,
@@ -58,10 +62,88 @@ Syllabus text:
 """
 
 
-def _extract_pdf_text(pdf_path: Path) -> str:
+def is_usable_pdf_text(text: str) -> bool:
+    """True when extracted PDF text has enough letters to parse or send to Gemini."""
+    letters = re.findall(r"[A-Za-z]", text or "")
+    return len(letters) >= MIN_USABLE_LETTERS
+
+
+def _extract_pdf_text_pypdf2(pdf_path: Path) -> str:
     reader = PdfReader(str(pdf_path))
     pages = [page.extract_text() or "" for page in reader.pages]
     return "\n".join(pages).strip()
+
+
+def _extract_pdf_text_pypdfium(pdf_path: Path) -> str:
+    """Optional second extractor. Soft-imported; not a hard dependency."""
+    try:
+        import pypdfium2
+    except ImportError:
+        return ""
+    try:
+        pdf = pypdfium2.PdfDocument(str(pdf_path))
+        try:
+            pages = []
+            for page in pdf:
+                textpage = page.get_textpage()
+                try:
+                    pages.append(textpage.get_text_bounded() or "")
+                finally:
+                    textpage.close()
+            return "\n".join(pages).strip()
+        finally:
+            pdf.close()
+    except Exception as exc:  # noqa: BLE001
+        logger.info("pypdfium2 could not read %s: %s", pdf_path.name, exc)
+        return ""
+
+
+def _ocr_pdf_text(pdf_path: Path) -> str:
+    """Optional OCR. Soft-imports pdf2image and pytesseract; never a hard dependency."""
+    try:
+        from pdf2image import convert_from_path
+        import pytesseract
+    except ImportError:
+        logger.warning(
+            "SYLLABUS_OCR=1 but pdf2image and pytesseract are not installed. "
+            "Scanned PDFs still need a text layer. Gemini will not be called on blank text."
+        )
+        return ""
+    try:
+        pytesseract.get_tesseract_version()
+    except Exception:
+        logger.warning(
+            "SYLLABUS_OCR=1 but the Tesseract program was not found on this machine. "
+            "Install Tesseract and retry, or add a text layer to the PDF. "
+            "Gemini will not be called on blank text."
+        )
+        return ""
+    try:
+        images = convert_from_path(str(pdf_path))
+        pages = [pytesseract.image_to_string(image) or "" for image in images]
+        return "\n".join(pages).strip()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("OCR failed for %s: %s", pdf_path.name, exc)
+        return ""
+
+
+def _extract_pdf_text(pdf_path: Path) -> str:
+    text = _extract_pdf_text_pypdf2(pdf_path)
+    if is_usable_pdf_text(text):
+        return text
+    alt = _extract_pdf_text_pypdfium(pdf_path)
+    if is_usable_pdf_text(alt):
+        logger.info(
+            "Extracted text from %s with pypdfium2 after PyPDF2 returned no usable text.",
+            pdf_path.name,
+        )
+        return alt
+    if SYLLABUS_OCR:
+        ocr = _ocr_pdf_text(pdf_path)
+        if is_usable_pdf_text(ocr):
+            logger.info("Extracted text from %s with OCR.", pdf_path.name)
+            return ocr
+    return text
 
 
 def _normalize_pdf_text(text: str) -> str:
@@ -395,6 +477,35 @@ def parse_weekly_schedule_text(text: str, course: str) -> list[dict[str, Any]]:
                 end_date=f"{due} {end_hhmm}",
             )
         )
+
+    seen_hw = {str(row.get("Task") or "") for row in assignments}
+    for match in re.finditer(
+        r"\bHW\s*(\d+)\s+(?:is\s+)?due(?:\s+date)?\s*:?\s+"
+        r"(?:(?:at\s+)?(?P<hour>\d{1,2})(?::(?P<minute>\d{2}))?\s*(?P<mer>[ap]\.?m\.?)?\s+)?"
+        r"(?:(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)[a-z]*\s+)?"
+        r"(?P<month>[A-Za-z]+)\s+(?P<day>\d{1,2})(?:,\s*(?P<year>\d{4}))?",
+        normalized,
+        re.IGNORECASE,
+    ):
+        hw_num = match.group(1)
+        task = f"HW{hw_num}"
+        if task in seen_hw:
+            continue
+        month = match.group("month")
+        if month.lower()[:3] not in MONTH_MAP and month.lower()[:4].rstrip("t") not in MONTH_MAP:
+            continue
+        year = int(match.group("year")) if match.group("year") else None
+        due = _month_day_to_iso(month, match.group("day"), year)
+        mer = (match.group("mer") or "").lower().replace(".", "")
+        if mer in {"am", "pm"} and match.group("hour"):
+            clock = _CLOCK_AFTER_DATE_RE.match(
+                f"{int(match.group('hour'))}:{int(match.group('minute') or 0):02d} {mer}"
+            )
+            hhmm = _hhmm_from_clock_match(clock) if clock else None
+            if hhmm:
+                due = f"{due} {hhmm}"
+        assignments.append(_record(course, task, due))
+        seen_hw.add(task)
 
     return assignments
 
@@ -738,11 +849,31 @@ def _gemini_generate(client: Any, prompt: str) -> str:
     return getattr(response, "text", None) or ""
 
 
+def _gemini_failure_reason(exc: BaseException) -> str:
+    text = str(exc)
+    lowered = text.lower()
+    if "429" in text or "resource_exhausted" in lowered or "quota" in lowered:
+        return "Gemini failed (429); no local parser rows were available."
+    if "503" in text or "unavailable" in lowered or "high demand" in lowered:
+        return "Gemini failed (503); no local parser rows were available."
+    return "Gemini failed; no local parser rows were available."
+
+
+def _record_parse_issue(pdf_path: Path, reason: str) -> None:
+    SYLLABUS_PARSE_ISSUES.append({"file": pdf_path.name, "reason": reason})
+
+
 def _parse_single_pdf(pdf_path: Path, client: Any | None) -> list[dict[str, Any]]:
     logger.info("Parsing syllabus: %s", pdf_path.name)
     text = _extract_pdf_text(pdf_path)
-    if not text:
-        logger.warning("No text extracted from %s — skipping.", pdf_path.name)
+    if not is_usable_pdf_text(text):
+        reason = "likely a scanned or image-only PDF (no usable text)"
+        logger.warning(
+            "No usable text extracted from %s — likely a scanned or image-only PDF. "
+            "Gemini was not called.",
+            pdf_path.name,
+        )
+        _record_parse_issue(pdf_path, reason)
         return []
 
     deterministic = _parse_with_deterministic_parser(pdf_path, text)
@@ -754,6 +885,9 @@ def _parse_single_pdf(pdf_path: Path, client: Any | None) -> list[dict[str, Any]
             "No Gemini client and no deterministic parser matched %s.",
             pdf_path.name,
         )
+        _record_parse_issue(
+            pdf_path, "no local parser matched, and Gemini is not configured"
+        )
         return []
 
     prompt = SYLLABUS_PROMPT.format(
@@ -762,11 +896,18 @@ def _parse_single_pdf(pdf_path: Path, client: Any | None) -> list[dict[str, Any]
     try:
         raw = _gemini_generate(client, prompt)
     except Exception as exc:  # noqa: BLE001
-        logger.error("Gemini parse failed for %s: %s", pdf_path.name, exc)
+        reason = _gemini_failure_reason(exc)
+        logger.error(
+            "Gemini parse failed for %s: %s. No local parser rows were available.",
+            pdf_path.name,
+            exc,
+        )
+        _record_parse_issue(pdf_path, reason)
         return []
 
     if not raw:
         logger.warning("Empty Gemini response for %s — skipping.", pdf_path.name)
+        _record_parse_issue(pdf_path, "Gemini returned an empty response; no local parser rows were available.")
         return []
     return _parse_gemini_response(
         raw, course_from_filename=_course_from_filename(pdf_path.name)
@@ -781,6 +922,7 @@ def fetch_syllabus_assignments() -> list[dict[str, Any]]:
         logger.info("No PDF files found in %s", SYLLABI_DIR)
         return []
 
+    SYLLABUS_PARSE_ISSUES.clear()
     client = _build_gemini_client()
     all_assignments: list[dict[str, Any]] = []
     for pdf_path in pdf_files:
